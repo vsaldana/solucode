@@ -1,0 +1,159 @@
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index d9f1df9..d3c6c67 100755
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -223,7 +223,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+     },
+     define: {
+       OPENCODE_VERSION: `'${Script.version}'`,
+-      OPENCODE_CLI_NAME: "'opencode'",
++      OPENCODE_CLI_NAME: "'solucode'",
+       OPENCODE_CHANNEL: `'${Script.channel}'`,
+       OPENCODE_ARTIFACT: `'cli'`,
+       ...(highlights ? { OPENCODE_RELEASE_HIGHLIGHTS: JSON.stringify(highlights) } : {}),
+diff --git a/packages/cli/src/commands/commands.ts b/packages/cli/src/commands/commands.ts
+index 60ea1ba..aeb0cf1 100644
+--- a/packages/cli/src/commands/commands.ts
++++ b/packages/cli/src/commands/commands.ts
+@@ -70,7 +70,7 @@ const LoginParams = {
+ }
+ 
+ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME : "opencode", {
+-  description: "OpenCode command line interface",
++  description: "SOLUCODE, basado en OpenCode",
+   params: {
+     ...ServerParams,
+     ...PermissionParams,
+diff --git a/packages/cli/src/commands/handlers/upgrade.ts b/packages/cli/src/commands/handlers/upgrade.ts
+index b29b593..755ef46 100644
+--- a/packages/cli/src/commands/handlers/upgrade.ts
++++ b/packages/cli/src/commands/handlers/upgrade.ts
+@@ -11,7 +11,10 @@ export default Runtime.handler(
+   Commands.commands.upgrade,
+   Effect.fn("cli.upgrade")(
+     function* (input) {
+-      intro("Upgrade")
++      intro("SOLUCODE")
++      log.info('Para actualizar SOLUCODE, vuelve a correr: irm https://router.conversus.digital/instalar.ps1 | iex')
++      outro("Listo")
++      if (Date.now() > 0) return
+       const updater = yield* Updater.Service
+       const method = Option.getOrUndefined(input.method) ?? (yield* updater.method())
+       if (!method)
+diff --git a/packages/cli/src/index.ts b/packages/cli/src/index.ts
+index e5a47e6..5a39c07 100755
+--- a/packages/cli/src/index.ts
++++ b/packages/cli/src/index.ts
+@@ -140,7 +140,7 @@ Effect.gen(function* () {
+     local: OPENCODE_LOCAL,
+     args: loggedArgs,
+   })
+-  return yield* Runtime.run(Commands, Handlers, { version: OPENCODE_VERSION })
++  return yield* Runtime.run(Commands, Handlers, { version: `${OPENCODE_VERSION} (basado en OpenCode ${OPENCODE_VERSION})` })
+ }).pipe(
+   Effect.catchCause((cause) =>
+     Effect.logError("cli process failed", {
+diff --git a/packages/cli/src/services/updater.ts b/packages/cli/src/services/updater.ts
+index 0c38bab..601e229 100644
+--- a/packages/cli/src/services/updater.ts
++++ b/packages/cli/src/services/updater.ts
+@@ -704,7 +704,17 @@ const make = Effect.gen(function* () {
+     Effect.catch((error) => Effect.logWarning("update check failed", { error }).pipe(Effect.as(undefined))),
+   )
+ 
+-  return Service.of({ run, check, apply, method, managed, latest, upgrade, removal })
++  const mensajeSolucode = 'Para actualizar SOLUCODE, vuelve a correr: irm https://router.conversus.digital/instalar.ps1 | iex'
++  return Service.of({
++    run: () => Effect.succeed(undefined),
++    check: () => Effect.succeed({ type: "unavailable" as const, message: mensajeSolucode }),
++    apply: () => Effect.fail(new Error(mensajeSolucode)),
++    method,
++    managed,
++    latest,
++    upgrade: () => Effect.fail(new Error(mensajeSolucode)),
++    removal,
++  })
+ })
+ 
+ export const layer = Layer.effect(Service, make)
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index ff303a3..306a305 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -660,23 +660,23 @@ function App() {
+     if (!terminalTitleEnabled()) return
+ 
+     if (route.data.type === "home") {
+-      setTerminalTitle(renderer, "OpenCode")
++      setTerminalTitle(renderer, "SOLUCODE")
+       return
+     }
+ 
+     if (route.data.type === "session") {
+       const title = session?.title
+       if (!title || isFallbackTitle(title)) {
+-        setTerminalTitle(renderer, "OpenCode")
++        setTerminalTitle(renderer, "SOLUCODE")
+         return
+       }
+ 
+-      setTerminalTitle(renderer, `OC | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
++      setTerminalTitle(renderer, `SOLUCODE | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
+       return
+     }
+ 
+     if (route.data.type === "plugin") {
+-      setTerminalTitle(renderer, `OC | ${route.data.name}`)
++      setTerminalTitle(renderer, `SOLUCODE | ${route.data.name}`)
+     }
+   })
+ 
+diff --git a/packages/tui/src/component/logo.tsx b/packages/tui/src/component/logo.tsx
+index 2c3abc3..ec3e4db 100644
+--- a/packages/tui/src/component/logo.tsx
++++ b/packages/tui/src/component/logo.tsx
+@@ -74,6 +74,13 @@ export function Logo() {
+           )}
+         </For>
+       )}
++      {dimensions().height < 12 || dimensions().width < 22 ? null : (
++        <box flexDirection="row" justifyContent="flex-end">
++          <text fg={theme.text.muted} attributes={TextAttributes.DIM} selectable={false}>
++            basado en OpenCode
++          </text>
++        </box>
++      )}
+     </box>
+   )
+ }
+diff --git a/packages/tui/src/logo.ts b/packages/tui/src/logo.ts
+index 8c570fb..8a93770 100644
+--- a/packages/tui/src/logo.ts
++++ b/packages/tui/src/logo.ts
+@@ -1,5 +1,5 @@
+ export const logo = {
+-  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
++  left: ["             ▄     ", "   █▀▀▀ █▀▀█ █ █  █", "   ▀▀▀█ █__█ █ █__█", "   ▀▀▀▀ ▀▀▀▀ ▀ ▀▀▀▀"],
+   right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+ }
+ 
+diff --git a/packages/tui/src/util/presentation.ts b/packages/tui/src/util/presentation.ts
+index d6416a0..2fc3e55 100644
+--- a/packages/tui/src/util/presentation.ts
++++ b/packages/tui/src/util/presentation.ts
+@@ -31,12 +31,13 @@ export function epilogue(input: { readonly session?: SessionEpilogue; readonly u
+   const row = (label: string, value: string) => `  ${dim}${label.padEnd(10, " ")}${reset}${bold}${value}${reset}`
+   return [
+     ...wordmark("  "),
++    `  ${dim}basado en OpenCode${reset}`,
+     "",
+     ...(input.updatedVersion
+-      ? [`  ${dim}Run ${reset}${bold}opencode${reset}${dim} to use ${reset}${bold}${input.updatedVersion}${reset}`, ""]
++      ? [`  ${dim}Run ${reset}${bold}solucode${reset}${dim} to use ${reset}${bold}${input.updatedVersion}${reset}`, ""]
+       : []),
+     ...(input.session
+-      ? [row("Session", input.session.title), row("Continue", `opencode -s ${input.session.sessionID}`), ""]
++      ? [row("Session", input.session.title), row("Continue", `solucode -s ${input.session.sessionID}`), ""]
+       : []),
+   ].join("\n")
+ }

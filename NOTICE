@@ -1,0 +1,9 @@
+SOLUCODE
+
+SOLUCODE es OpenCode (https://github.com/anomalyco/opencode) con la marca de
+Solutoria. OpenCode es software libre con licencia MIT; su texto completo, con
+el copyright de sus autores, está en LICENSE.
+
+Los únicos cambios sobre OpenCode están en parches/ de
+https://github.com/vsaldana/solucode: el logo, el nombre del comando, el título
+de la ventana, la línea de --version y que no se actualiza solo.

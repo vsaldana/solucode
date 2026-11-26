@@ -1,0 +1,134 @@
+# Compila SOLUCODE para Windows: OpenCode (anomalyco/opencode) con la marca de
+# parches/, igual que el build-cli del release.yml de OpenCode.
+#
+# - Un tag v<versión>-solucode.<n> compila esa versión y publica el release con
+#   solucode-windows-x64.zip.
+# - A mano (workflow_dispatch) compila sin publicar: sirve para probar el parche.
+# - Cada lunes revisa si OpenCode sacó una versión nueva. Si la marca se aplica
+#   y compila, publica un prerelease v<nueva>-solucode.1; si no, abre un issue.
+#   El instalador del router no lo usa hasta que alguien suba VERSION y lo fije.
+name: compilar
+
+on:
+  push:
+    tags: ["v*-solucode.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión de OpenCode, sin v (vacío: la de VERSION)"
+        required: false
+        type: string
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: compilar-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  compilar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: plan
+        name: Decide qué compilar
+        run: bash script/plan.sh
+        env:
+          ENTRADA_VERSION: ${{ inputs.version }}
+
+      - name: Trae OpenCode y aplica la marca
+        if: steps.plan.outputs.compilar == 'true'
+        run: bash script/aplicar.sh "${{ steps.plan.outputs.version }}" upstream
+
+      - name: Node
+        if: steps.plan.outputs.compilar == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Bun, en la versión que fija OpenCode
+        if: steps.plan.outputs.compilar == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: upstream/package.json
+
+      - name: Dependencias
+        if: steps.plan.outputs.compilar == 'true'
+        working-directory: upstream
+        run: |
+          python3 -m pip install setuptools || true
+          bun install --frozen-lockfile
+          echo "BUN_COMPILE_RELEASE=bun-v$(bun --version)" >> "$GITHUB_ENV"
+
+      - name: Catálogo de modelos
+        if: steps.plan.outputs.compilar == 'true'
+        working-directory: upstream
+        run: bun packages/core/script/update-models-snapshot.ts .cache/models-catalog/api.json
+
+      - name: Compila Linux (para probarlo aquí) y Windows
+        if: steps.plan.outputs.compilar == 'true'
+        working-directory: upstream/packages/cli
+        env:
+          OPENCODE_VERSION: ${{ steps.plan.outputs.version }}
+          OPENCODE_CHANNEL: latest
+          OPENCODE_MODELS_SNAPSHOT: ${{ github.workspace }}/upstream/.cache/models-catalog/api.json
+        run: |
+          OPENCODE_TARGET=linux-x64 bun run build --outdir=dist-linux
+          OPENCODE_TARGET=windows-x64 bun run build --outdir=dist-windows
+
+      - name: Prueba la marca
+        if: steps.plan.outputs.compilar == 'true'
+        working-directory: upstream/packages/cli
+        run: |
+          set -euo pipefail
+          v="${{ steps.plan.outputs.version }}"
+          salida="$(./dist-linux/cli-linux-x64/bin/opencode --version)"
+          echo "$salida"
+          [ "$salida" = "solucode v$v (basado en OpenCode $v)" ] || { echo "--version no dice lo esperado"; exit 1; }
+          ./dist-linux/cli-linux-x64/bin/opencode --help | head -5
+          exe=dist-windows/cli-windows-x64/bin/opencode.exe
+          for texto in "basado en OpenCode" "SOLUCODE | " "Para actualizar SOLUCODE"; do
+            grep -a -q -F "$texto" "$exe" || { echo "el exe de Windows no trae: $texto"; exit 1; }
+          done
+          echo "la marca está en el exe de Windows"
+
+      - name: Arma el zip
+        if: steps.plan.outputs.compilar == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p salida/solucode
+          cp upstream/packages/cli/dist-windows/cli-windows-x64/bin/opencode.exe salida/solucode/solucode.exe
+          cp LICENSE NOTICE salida/solucode/
+          (cd salida/solucode && zip -q -9 ../solucode-windows-x64.zip solucode.exe LICENSE NOTICE)
+          (cd salida && sha256sum solucode-windows-x64.zip > SHA256SUMS && cat SHA256SUMS)
+          ls -la salida
+
+      - name: Publica
+        if: steps.plan.outputs.compilar == 'true' && steps.plan.outputs.publicar != 'nada'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.plan.outputs.tag }}"
+          v="${{ steps.plan.outputs.version }}"
+          notas="SOLUCODE $tag: OpenCode $v (anomalyco/opencode, licencia MIT) con la marca de Solutoria. Se instala con: irm https://router.conversus.digital/instalar.ps1 | iex"
+          if [ "${{ steps.plan.outputs.publicar }}" = prerelease ]; then
+            gh release create "$tag" salida/solucode-windows-x64.zip salida/SHA256SUMS \
+              --target "$GITHUB_SHA" --prerelease --title "SOLUCODE $tag (prueba)" \
+              --notes "$notas. Prerelease automático: el instalador no lo usa hasta que se suba VERSION a $v."
+          else
+            gh release create "$tag" salida/solucode-windows-x64.zip salida/SHA256SUMS \
+              --verify-tag --title "SOLUCODE $tag" --notes "$notas"
+          fi
+
+      - name: Abre un issue si la versión nueva no compila
+        if: failure() && steps.plan.outputs.modo == 'semanal'
+        run: |
+          gh issue create --title "No se pudo compilar SOLUCODE sobre OpenCode ${{ steps.plan.outputs.version }}" \
+            --body "La revisión semanal no pudo aplicar la marca o compilar OpenCode ${{ steps.plan.outputs.version }}. Corrida: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Para arreglarlo: correr script/aplicar.sh con esa versión, ajustar parches/marca.py y regenerar parches/solucode.patch."
