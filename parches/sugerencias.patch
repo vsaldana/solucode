@@ -56,7 +56,7 @@ index 42b4dc3..cf217fc 100644
  
  export type ExperimentalGenerateTextOutput = GenerateTextResponse["data"]
 diff --git a/packages/core/src/generate.ts b/packages/core/src/generate.ts
-index adf7bd7..c115d05 100644
+index adf7bd7..1f5cd1c 100644
 --- a/packages/core/src/generate.ts
 +++ b/packages/core/src/generate.ts
 @@ -33,6 +33,7 @@ import { ModelRetry } from "./model-retry.js"
@@ -67,7 +67,7 @@ index adf7bd7..c115d05 100644
  }
  
  export interface VideoInput {
-@@ -177,8 +178,24 @@ export const layer = Layer.effect(
+@@ -177,8 +178,29 @@ export const layer = Layer.effect(
            ai.request({
              model: resolved.model,
              prompt: input.prompt,
@@ -88,13 +88,18 @@ index adf7bd7..c115d05 100644
 -            headers: { "x-opencode-session": SessionID.create() },
 +            headers: {
 +              "x-opencode-session": input.experimental?.solucodeSuggestion.sessionID ?? SessionID.create(),
-+              ...(input.experimental?.solucodeSuggestion ? { "x-solucode-purpose": "prompt-suggestion" } : {}),
++              ...(input.experimental?.solucodeSuggestion
++                ? {
++                    "x-opencode-session-id": input.experimental.solucodeSuggestion.sessionID,
++                    "x-solucode-purpose": "prompt-suggestion",
++                  }
++                : {}),
 +            },
            }),
          )
          .pipe(
 diff --git a/packages/core/test/generate.test.ts b/packages/core/test/generate.test.ts
-index adbe8a5..1fde6f9 100644
+index adbe8a5..555c101 100644
 --- a/packages/core/test/generate.test.ts
 +++ b/packages/core/test/generate.test.ts
 @@ -25,6 +25,7 @@ import { ID, Info, Model, Ref, VariantID } from "@opencode/core/model"
@@ -105,7 +110,7 @@ index adbe8a5..1fde6f9 100644
  import { Npm } from "@opencode/util/npm"
  import { Effect, Exit, Fiber, Layer } from "effect"
  import { TestClock } from "effect/testing"
-@@ -89,6 +90,29 @@ const retryIt = testEffect(
+@@ -89,6 +90,30 @@ const retryIt = testEffect(
    Generate.layer.pipe(Layer.provideMerge(Layer.mergeAll(resolver, TestLLM.testLayer(), generateDeps))),
  )
  
@@ -126,6 +131,7 @@ index adbe8a5..1fde6f9 100644
 +    expect(request.tools).toEqual([])
 +    expect(request.headers).toMatchObject({
 +      "x-opencode-session": "ses_suggestion",
++      "x-opencode-session-id": "ses_suggestion",
 +      "x-solucode-purpose": "prompt-suggestion",
 +    })
 +    expect(JSON.stringify(request.system)).toContain("llamada automática")
@@ -135,7 +141,7 @@ index adbe8a5..1fde6f9 100644
  it.effect("loads dynamic AI SDK models", () =>
    Effect.gen(function* () {
      const generate = yield* Generate.Service
-@@ -323,7 +347,7 @@ describe("image and decision generation", () => {
+@@ -323,7 +348,7 @@ describe("image and decision generation", () => {
          Provider.Info.make({
            ...Provider.Info.empty(providerID),
            activation: "enabled",
@@ -391,6 +397,126 @@ index 0000000..dbda87a
 +    },
 +  }
 +}
+diff --git a/packages/tui/test/app-lifecycle.test.tsx b/packages/tui/test/app-lifecycle.test.tsx
+index 43edb0b..426a573 100644
+--- a/packages/tui/test/app-lifecycle.test.tsx
++++ b/packages/tui/test/app-lifecycle.test.tsx
+@@ -256,7 +256,7 @@ test("SIGHUP clears title and disposes scoped resources once", async () => {
+   })
+   const setTitle = setup.renderer.setTerminalTitle.bind(setup.renderer)
+   setup.renderer.setTerminalTitle = (title) => {
+-    if (title === "OpenCode") started()
++    if (title === "SOLUCODE") started()
+     setTitle(title)
+   }
+   const listeners = new Set(process.listeners("SIGHUP"))
+@@ -304,8 +304,8 @@ test("session lifecycle updates the terminal title and prints the epilogue after
+   })
+   const setTitle = setup.renderer.setTerminalTitle.bind(setup.renderer)
+   setup.renderer.setTerminalTitle = (title) => {
+-    if (title === "OC | Demo session") initialTitle()
+-    if (title === "OC | Renamed session") renamedTitle()
++    if (title === "SOLUCODE | Demo session") initialTitle()
++    if (title === "SOLUCODE | Renamed session") renamedTitle()
+     setTitle(title)
+   }
+   const events = createEventStream()
+@@ -369,7 +369,7 @@ test("session lifecycle updates the terminal title and prints the epilogue after
+     await task
+ 
+     expect(stdout).toContain("Renamed session")
+-    expect(stdout).toContain("opencode -s dummy")
++    expect(stdout).toContain("solucode -s dummy")
+     expect(promptRequests).toBe(0)
+   } finally {
+     process.stdout.write = originalWrite
+@@ -387,7 +387,7 @@ test("session title generated while an untitled session is loading remains visib
+   const generatedTitle = Promise.withResolvers<void>()
+   setup.renderer.setTerminalTitle = (title) => {
+     titles.push(title)
+-    if (title === "OC | Generated title") generatedTitle.resolve()
++    if (title === "SOLUCODE | Generated title") generatedTitle.resolve()
+     setTitle(title)
+   }
+   const sessionRequested = Promise.withResolvers<void>()
+@@ -455,7 +455,7 @@ test("session title generated while an untitled session is loading remains visib
+     ])
+     await Bun.sleep(20)
+ 
+-    const generated = titles.lastIndexOf("OC | Generated title")
++    const generated = titles.lastIndexOf("SOLUCODE | Generated title")
+     expect(generated).toBeGreaterThan(-1)
+     expect(titles.slice(generated + 1)).not.toContain("OpenCode")
+     setup.renderer.destroy()
+@@ -816,7 +816,10 @@ test.each(["show", "hide"] as const)(
+     })
+     await setup.waitForFrame((frame) => frame.includes("Answer text"))
+     if (thinking === "hide") {
+-      const row = setup.captureCharFrame().split("\n").findIndex((line) => line.includes("+ Thought"))
++      const row = setup
++        .captureCharFrame()
++        .split("\n")
++        .findIndex((line) => line.includes("+ Thought"))
+       await setup.mockMouse.click(6, row)
+     }
+     await setup.waitForFrame((frame) => frame.includes("THOUGHT_START"))
+@@ -1502,10 +1505,10 @@ test("ctrl+c dismisses autocomplete and shell mode before exiting", async () =>
+ 
+ test.skipIf(process.platform === "win32").each(["manual", "select"] as const)(
+   "selection copy and pane management respect %s mode in the prompt and terminal pane",
+-    async (copy) => {
+-      await using state = await tmpdir()
+-      const setup = await createTestRenderer({ width: 100, height: 30, kittyKeyboard: true })
+-      await setup.renderer.setupTerminal()
++  async (copy) => {
++    await using state = await tmpdir()
++    const setup = await createTestRenderer({ width: 100, height: 30, kittyKeyboard: true })
++    await setup.renderer.setupTerminal()
+     setup.renderer.start()
+     const ready = Promise.withResolvers<void>()
+     const session = {
+@@ -2104,9 +2107,7 @@ test("free usage limit offers OpenCode Go once per 24h, transitions Subscribe to
+   setup.mockInput.pressEnter()
+   await setup.waitForFrame((frame) => frame.includes("GOGO-1234"))
+   expect(openSpy).toHaveBeenCalledWith("https://opencode.ai/go")
+-  expect(oauthRequests).toEqual([
+-    { methodID: "device", answer: { server: "https://opencode.ai/console" } },
+-  ])
++  expect(oauthRequests).toEqual([{ methodID: "device", answer: { server: "https://opencode.ai/console" } }])
+   const connectFrame = setup.captureCharFrame()
+   expect(connectFrame).toContain("OpenCode Console account")
+   expect(connectFrame).not.toContain("Enter Go API key")
+@@ -2395,7 +2396,13 @@ test("free usage limit Subscribe handles mid-auth/mid-sync Escape, sync failure,
+     created: 6,
+     type: "session.step.started",
+     durable: { aggregateID: session.id, seq: 6, version: 1 },
+-    data: { sessionID: session.id, assistantMessageID: "msg_free_assistant_expired", agent: "build", model, started: 6 },
++    data: {
++      sessionID: session.id,
++      assistantMessageID: "msg_free_assistant_expired",
++      agent: "build",
++      model,
++      started: 6,
++    },
+   })
+   setup.events.emit({
+     id: "evt_free_limit_expired_fail",
+diff --git a/packages/tui/test/preload.ts b/packages/tui/test/preload.ts
+index f5ccf62..fd5b6f3 100644
+--- a/packages/tui/test/preload.ts
++++ b/packages/tui/test/preload.ts
+@@ -1,4 +1,11 @@
+ import { NativeError, NativeStatus, OptimizedBuffer } from "@opentui/core"
++import { afterEach } from "bun:test"
++import { takeDraft } from "../src/component/prompt/draft-stash"
++
++// A new test owns a fresh home composer, even when the previous app saved a draft on disposal.
++afterEach(() => {
++  takeDraft(undefined)
++})
+ 
+ // Workaround: OpenTUI's test renderer can read a frame while the native writer is still flushing
+ // output, which throws OutputBusy until the event loop runs. Frame reads poll, so fall back to the
 diff --git a/packages/tui/test/prompt/suggestion-composer.test.tsx b/packages/tui/test/prompt/suggestion-composer.test.tsx
 new file mode 100644
 index 0000000..1f53451
@@ -596,3 +722,34 @@ index 0000000..39a1110
 +  expect(suggestionTurn([user, assistant])).toBeUndefined()
 +  expect(suggestionTurn([user, assistant, { ...idle, outcome: "interrupted" }])).toBeUndefined()
 +})
+diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/util/presentation.test.ts
+index e4a8e4d..474e86e 100644
+--- a/packages/tui/test/util/presentation.test.ts
++++ b/packages/tui/test/util/presentation.test.ts
+@@ -12,19 +12,21 @@ test("prints nothing without a session or update", () => {
+ 
+ test("formats session continuation summary", () => {
+   expect(rows(epilogue({ session: { title: "A session", sessionID: "ses_123" } }))).toEqual([
++    "  basado en OpenCode",
+     "  Session   A session",
+-    "  Continue  opencode -s ses_123",
++    "  Continue  solucode -s ses_123",
+   ])
+ })
+ 
+-test("tells the user to start OpenCode again after an update", () => {
+-  expect(rows(epilogue({ updatedVersion: "2.0.0" }))).toEqual(["  Run opencode to use 2.0.0"])
++test("tells the user to start SOLUCODE again after an update", () => {
++  expect(rows(epilogue({ updatedVersion: "2.0.0" }))).toEqual(["  basado en OpenCode", "  Run solucode to use 2.0.0"])
+ })
+ 
+ test("keeps the session continuation after an update", () => {
+   expect(rows(epilogue({ session: { title: "A session", sessionID: "ses_123" }, updatedVersion: "2.0.0" }))).toEqual([
+-    "  Run opencode to use 2.0.0",
++    "  basado en OpenCode",
++    "  Run solucode to use 2.0.0",
+     "  Session   A session",
+-    "  Continue  opencode -s ses_123",
++    "  Continue  solucode -s ses_123",
+   ])
+ })
