@@ -9,6 +9,7 @@ Conserva la configuración (`%ProgramData%\opencode`, `~/.config/opencode`) y la
 - el título de la ventana dice SOLUCODE;
 - no se actualiza solo ni baja OpenCode: `solucode upgrade` explica que se actualiza volviendo a correr el instalador.
 - al terminar una respuesta, puede sugerir el próximo mensaje; Tab o flecha derecha lo copia al editor, donde se puede modificar antes de enviarlo con Enter. Escribir descarta la sugerencia.
+- los modelos del router no ofrecen selector ni comandos de esfuerzo; ese ajuste se administra en `router.conversus.digital`.
 
 ## Sugerencias de próximo mensaje
 
@@ -45,7 +46,7 @@ irm https://router.conversus.digital/instalar.ps1 | iex
 ## Pasar a una versión nueva de OpenCode
 
 1. Revisa el prerelease automático, o el issue si no compiló.
-2. Si hace falta, ajusta `parches/marca.py`, corre `script/aplicar.sh <nueva> upstream` y regenera el parche con `git -C upstream diff > parches/solucode.patch`.
+2. Si hace falta, ajusta `parches/marca.py`. En un clon nuevo de OpenCode aplica solo `marca.py` para regenerar `parches/solucode.patch`; después adapta `parches/sugerencias.patch` por separado, sin duplicar los cambios de marca. Regenera el cliente y ejecuta `verificar.yml` antes de publicar.
 3. Sube `VERSION`, haz commit y crea el tag `v<nueva>-solucode.1`.
 4. En conversusgo, cambia la versión fija del instalador del router (`apps/router`).
 

@@ -192,6 +192,65 @@ index 2349bd3..f005f9e 100644
          const generate = yield* Generate.Service
          return { data: { text: yield* generate.text(request.payload).pipe(Effect.mapError(generateError)) } }
        },
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 306a305..9571b8d 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -1001,31 +1001,29 @@ function App() {
+           local.agent.move(1)
+         },
+       },
+-      {
+-        name: "variant.cycle",
+-        title: "Variant cycle",
+-        category: "Agent",
+-        run: () => {
+-          local.model.variant.cycle()
+-        },
+-      },
+-      {
+-        name: "variant.list",
+-        title: "Switch model variant",
+-        category: "Agent",
+-        palette: local.model.variant.list().length === 0 ? undefined : (true as const),
+-        slash: { name: "variants", aliases: ["thinking", "effort"] },
+-        run: () => {
+-          if (local.model.variant.list().length === 0) {
+-            return toast.show({
+-              title: "No variants available",
+-              message: "The current model does not support any variants.",
+-              variant: "info",
+-            })
+-          }
+-          dialog.replace(() => <DialogVariant />)
+-        },
+-      },
++      // The router manages effort; models without variants expose no effort commands.
++      ...(local.model.variant.list().length > 0
++        ? [
++            {
++              name: "variant.cycle",
++              title: "Variant cycle",
++              category: "Agent",
++              run: () => {
++                local.model.variant.cycle()
++              },
++            },
++            {
++              name: "variant.list",
++              title: "Switch model variant",
++              category: "Agent",
++              palette: true as const,
++              slash: { name: "variants", aliases: ["thinking", "effort"] },
++              run: () => {
++                dialog.replace(() => <DialogVariant />)
++              },
++            },
++          ]
++        : []),
+       // Only for a model that has other speeds, so nothing about speeds shows for the rest.
+       ...(local.model.speed.list().length > 0
+         ? [
 diff --git a/packages/tui/src/component/dialog-experiments.tsx b/packages/tui/src/component/dialog-experiments.tsx
 index cc70c26..5b23287 100644
 --- a/packages/tui/src/component/dialog-experiments.tsx
@@ -501,6 +560,61 @@ index 43edb0b..426a573 100644
    })
    setup.events.emit({
      id: "evt_free_limit_expired_fail",
+diff --git a/packages/tui/test/command-selection.test.tsx b/packages/tui/test/command-selection.test.tsx
+index 3bfa2e6..db15380 100644
+--- a/packages/tui/test/command-selection.test.tsx
++++ b/packages/tui/test/command-selection.test.tsx
+@@ -4,6 +4,50 @@ import { directory, json } from "./fixture/tui-client"
+ import { tmpdir } from "./fixture/fixture"
+ import { createAppFixture } from "./fixture/app"
+ 
++test("router models expose no effort commands or selector", async () => {
++  const location = { directory }
++  await using setup = await createAppFixture({
++    config: { animations: false, keybinds: { "model.list": "f8", "variant.cycle": "f7" } },
++    fetch: (url) => {
++      if (url.pathname === "/api/location") return json(location)
++      if (url.pathname === "/api/agent")
++        return json({ location, data: [{ id: "build", mode: "primary", hidden: false, permissions: [] }] })
++      if (url.pathname === "/api/provider") return json({ location, data: [{ id: "router", name: "Solutoria" }] })
++      if (url.pathname === "/api/model")
++        return json({
++          location,
++          data: ["Normal", "Pro"].map((name) => ({
++            id: name.toLowerCase(),
++            providerID: "router",
++            name: `Modelo ${name}`,
++            variants: [],
++            cost: [],
++            time: { released: 0 },
++          })),
++        })
++    },
++  })
++  await setup.ready
++  await setup.waitForFrame((frame) => frame.includes("Modelo Normal"))
++  setup.mockInput.pressKey("F8")
++  await setup.waitForFrame(
++    (frame) => frame.includes("Select model") && setup.renderer.currentFocusedEditor instanceof InputRenderable,
++  )
++  await setup.mockInput.typeText("Modelo Pro")
++  await setup.renderOnce()
++  setup.mockInput.pressEnter()
++  await setup.waitForFrame(
++    (frame) => frame.includes("Modelo Pro") && setup.renderer.currentFocusedEditor instanceof TextareaRenderable,
++  )
++  expect(setup.captureCharFrame()).not.toContain("Select variant")
++  setup.mockInput.pressKey("F7")
++  await setup.mockInput.typeText("/effort")
++  await setup.waitForFrame((frame) => frame.includes("/effort"))
++  await setup.renderOnce()
++  expect(setup.captureCharFrame()).not.toContain("Switch model variant")
++  expect(setup.captureCharFrame()).not.toContain("Select variant")
++})
++
+ test("custom commands commit the captured agent, model and variant before execution", async () => {
+   await using state = await tmpdir()
+   const agent = Promise.withResolvers<Response>()
 diff --git a/packages/tui/test/preload.ts b/packages/tui/test/preload.ts
 index f5ccf62..fd5b6f3 100644
 --- a/packages/tui/test/preload.ts
