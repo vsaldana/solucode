@@ -11,7 +11,10 @@ version="${1:?falta la versión de OpenCode}"
 destino="${2:?falta la carpeta de destino}"
 raiz="$(cd "$(dirname "$0")/.." && pwd)"
 
-rm -rf "$destino"
+if [ -e "$destino" ]; then
+  echo "El destino ya existe: $destino. Usa una carpeta nueva para no borrar trabajo." >&2
+  exit 1
+fi
 git clone -q --depth 1 --branch "v$version" https://github.com/anomalyco/opencode.git "$destino"
 cd "$destino"
 
@@ -22,4 +25,7 @@ else
   echo "parches/solucode.patch no aplica sobre OpenCode $version; pruebo parches/marca.py"
   python3 "$raiz/parches/marca.py" .
 fi
+git apply --check "$raiz/parches/sugerencias.patch"
+git apply "$raiz/parches/sugerencias.patch"
+echo "sugerencias aplicadas con parches/sugerencias.patch"
 git --no-pager diff --stat
