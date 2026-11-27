@@ -1,0 +1,156 @@
+--- a/packages/tui/src/logo.ts
++++ b/packages/tui/src/logo.ts
+@@ -7,3 +7,25 @@
+   left: ["    ", "█▀▀▀", "█_^█", "▀▀▀▀"],
+   right: ["    ", "█▀▀█", "█__█", "▀▀▀▀"],
+ }
++
++// Arte de marca: sigma blanco sobre el círculo turquesa, en medios bloques de terminal.
++const sigma = [
++  "  ccccc  ",
++  " cwwwwwc ",
++  "ccwwccccc",
++  "ccccwwccc",
++  "ccccwwccc",
++  "ccwwccccc",
++  " cwwwwwc ",
++  "  ccccc  ",
++]
++const coloresSigma: Record<string, string | undefined> = { c: "#00abc1", w: "#ffffff" }
++
++export function sigmaLine(row: number) {
++  return Array.from(sigma[row * 2], (pixel, column) => {
++    const bottom = sigma[row * 2 + 1][column]
++    return pixel === " "
++      ? { char: bottom === " " ? " " : "▄", fg: coloresSigma[bottom], bg: undefined }
++      : { char: "▀", fg: coloresSigma[pixel], bg: coloresSigma[bottom] }
++  })
++}
+--- a/packages/tui/src/component/logo.tsx
++++ b/packages/tui/src/component/logo.tsx
+@@ -3,7 +3,27 @@
+ import { useTerminalDimensions } from "@opentui/solid"
+ import { useTheme } from "../context/theme"
+ import { tint } from "../theme/color"
+-import { go, logo } from "../logo"
++import { logo, sigmaLine } from "../logo"
++
++function Sigma() {
++  return (
++    <box flexShrink={0}>
++      <For each={[0, 1, 2, 3]}>
++        {(row) => (
++          <box flexDirection="row">
++            <For each={sigmaLine(row)}>
++              {(cell) => (
++                <text fg={cell.fg} bg={cell.bg} selectable={false}>
++                  {cell.char}
++                </text>
++              )}
++            </For>
++          </box>
++        )}
++      </For>
++    </box>
++  )
++}
+ 
+ export function Logo() {
+   const theme = useTheme()
+@@ -52,27 +72,41 @@
+   return (
+     <box>
+       {dimensions().height < 12 ? null : dimensions().width < 22 ? (
+-        <For each={go.right.slice(1)}>
+-          {(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}
+-        </For>
+-      ) : dimensions().width < 44 ? (
+-        <>
+-          <For each={logo.left.slice(1)}>
+-            {(line) => <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>}
+-          </For>
+-          <For each={logo.right}>
+-            {(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}
+-          </For>
+-        </>
++        <text fg={theme.text.base} attributes={TextAttributes.BOLD} selectable={false}>
++          {dimensions().width < 12 ? "Σ" : "Σ SOLUCODE"}
++        </text>
++      ) : dimensions().width < 34 ? (
++        <box flexDirection="row" gap={2} alignItems="center">
++          <Sigma />
++          <text fg={theme.text.base} attributes={TextAttributes.BOLD} selectable={false}>
++            SOLUCODE
++          </text>
++        </box>
+       ) : (
+-        <For each={logo.left}>
+-          {(line, index) => (
+-            <box flexDirection="row" gap={1}>
+-              <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>
+-              <box flexDirection="row">{renderLine(logo.right[index()], theme.text.base, true)}</box>
+-            </box>
+-          )}
+-        </For>
++        <box flexDirection="row" gap={2} alignItems="center">
++          <Sigma />
++          <box>
++            {dimensions().width < 54 ? (
++              <>
++                <For each={logo.left.slice(1)}>
++                  {(line) => <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>}
++                </For>
++                <For each={logo.right}>
++                  {(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}
++                </For>
++              </>
++            ) : (
++              <For each={logo.left}>
++                {(line, index) => (
++                  <box flexDirection="row" gap={1}>
++                    <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>
++                    <box flexDirection="row">{renderLine(logo.right[index()], theme.text.base, true)}</box>
++                  </box>
++                )}
++              </For>
++            )}
++          </box>
++        </box>
+       )}
+       {dimensions().height < 12 || dimensions().width < 22 ? null : (
+         <box flexDirection="row" justifyContent="flex-end">
+--- a/packages/tui/src/util/presentation.ts
++++ b/packages/tui/src/util/presentation.ts
+@@ -1,10 +1,12 @@
+-import { logo } from "../logo"
++import { logo, sigmaLine } from "../logo"
+ 
+ const reset = "\x1b[0m"
+ const bold = "\x1b[1m"
+ const dim = "\x1b[90m"
+ 
+ function wordmark(pad = "") {
++  const width = process.stdout.columns ?? 80
++  if (width < 21) return [`${pad}${bold}${width < 12 ? "Σ" : "Σ SOLUCODE"}${reset}`]
+   const draw = (line: string, fg: string, shadow: string, bg: string) =>
+     [...line]
+       .map((char) => {
+@@ -17,9 +19,17 @@
+       .join("")
+ 
+   return logo.left.map((line, index) => {
++    const sigma = sigmaLine(index)
++      .map((cell) => {
++        const color = (hex: string, background: boolean) =>
++          `\x1b[${background ? 48 : 38};2;${hex.slice(1).match(/../g)!.map((part) => parseInt(part, 16)).join(";")}m`
++        return `${cell.fg ? color(cell.fg, false) : ""}${cell.bg ? color(cell.bg, true) : ""}${cell.char}${reset}`
++      })
++      .join("")
++    if (width < 52) return `${pad}${sigma}${index === 1 ? `  ${bold}SOLUCODE${reset}` : ""}`
+     const left = draw(line, dim, "\x1b[38;5;235m", "\x1b[48;5;235m")
+     const right = draw(logo.right[index] ?? "", reset, "\x1b[38;5;238m", "\x1b[48;5;238m")
+-    return `${pad}${left} ${right}`
++    return `${pad}${sigma}  ${left} ${right}`
+   })
+ }
+ 

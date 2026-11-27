@@ -4,8 +4,8 @@ SOLUCODE es OpenCode (licencia MIT, [anomalyco/opencode](https://github.com/anom
 
 Conserva la configuración (`%ProgramData%\opencode`, `~/.config/opencode`) y las variables `OPENCODE_*`. Los cambios están en `parches/`:
 
-- el logo dice SOLUCODE, con «basado en OpenCode» debajo;
-- el comando es `solucode`, y `solucode --version` dice `solucode v2.4.2-solucode.3 (basado en OpenCode 2.4.2)`;
+- el logo lleva un sigma blanco sobre un círculo turquesa antes de SOLUCODE, con «basado en OpenCode» debajo; se adapta al ancho de la terminal y también aparece al cerrar;
+- el comando es `solucode`, y `solucode --version` dice `solucode v2.4.2-solucode.4 (basado en OpenCode 2.4.2)`;
 - el título de la ventana dice SOLUCODE;
 - mientras la terminal está abierta, descarga en segundo plano las versiones nuevas aprobadas por el router; quedan instaladas para la próxima apertura. `solucode upgrade` permite comprobar e instalar manualmente esa misma versión aprobada.
 - al terminar una respuesta, puede sugerir el próximo mensaje; Tab o flecha derecha lo copia al editor, donde se puede modificar antes de enviarlo con Enter. Escribir descarta la sugerencia.
@@ -40,6 +40,7 @@ irm https://router.conversus.digital/instalar.ps1 | iex
 - `script/aplicar.sh <versión> <carpeta>` trae OpenCode en esa versión y le aplica `parches/solucode.patch`. Si el parche ya no calza, prueba `parches/marca.py`, que hace los mismos cambios buscando los textos.
 - Después aplica obligatoriamente `parches/sugerencias.patch`; si no calza, falla y hay que adaptarlo. Usa una carpeta nueva: el guion no borra destinos existentes.
 - Aplica también `parches/autoactualizacion.patch`, con el cliente de actualizaciones y sus pruebas de Windows.
+- Finalmente aplica `parches/sigma.patch`, con el emblema de marca para la terminal. Su paleta fija pertenece al dibujo; el nombre y la leyenda conservan los colores del tema.
 - `script/probar.sh`, desde el clon con sus dependencias, regenera el cliente y prueba lógica, terminal, generación y tipos. `verificar.yml` lo hace en Linux y Windows; Linux ejecuta también `bun run check`.
 - `.github/workflows/compilar.yml` compila igual que el `build-cli` de OpenCode:
   - con un tag `v<versión>-solucode.<n>` publica el release con `solucode-windows-x64.zip`;
