@@ -28,4 +28,7 @@ fi
 git apply --check "$raiz/parches/sugerencias.patch"
 git apply "$raiz/parches/sugerencias.patch"
 echo "sugerencias aplicadas con parches/sugerencias.patch"
+git apply --check "$raiz/parches/autoactualizacion.patch"
+git apply "$raiz/parches/autoactualizacion.patch"
+echo "autoactualización aplicada con parches/autoactualizacion.patch"
 git --no-pager diff --stat

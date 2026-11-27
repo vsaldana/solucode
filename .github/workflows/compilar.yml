@@ -64,7 +64,7 @@ jobs:
         if: steps.plan.outputs.compilar == 'true'
         working-directory: upstream
         run: |
-          python3 -m pip install setuptools || true
+          python3 -m pip install setuptools
           bun install --frozen-lockfile
           echo "BUN_COMPILE_RELEASE=bun-v$(bun --version)" >> "$GITHUB_ENV"
 
@@ -82,7 +82,7 @@ jobs:
         if: steps.plan.outputs.compilar == 'true'
         working-directory: upstream/packages/cli
         env:
-          OPENCODE_VERSION: ${{ steps.plan.outputs.version }}
+          OPENCODE_VERSION: ${{ steps.plan.outputs.solucode }}
           OPENCODE_CHANNEL: latest
           OPENCODE_MODELS_SNAPSHOT: ${{ github.workspace }}/upstream/.cache/models-catalog/api.json
         run: |
@@ -95,12 +95,13 @@ jobs:
         run: |
           set -euo pipefail
           v="${{ steps.plan.outputs.version }}"
+          revision="${{ steps.plan.outputs.solucode }}"
           salida="$(./dist-linux/cli-linux-x64/bin/opencode --version)"
           echo "$salida"
-          [ "$salida" = "solucode v$v (basado en OpenCode $v)" ] || { echo "--version no dice lo esperado"; exit 1; }
+          [ "$salida" = "solucode v$revision (basado en OpenCode $v)" ] || { echo "--version no dice lo esperado"; exit 1; }
           ./dist-linux/cli-linux-x64/bin/opencode --help | head -5
           exe=dist-windows/cli-windows-x64/bin/opencode.exe
-          for texto in "basado en OpenCode" "SOLUCODE | " "Para actualizar SOLUCODE"; do
+          for texto in "basado en OpenCode" "SOLUCODE | " "solucode/actualizacion.json"; do
             grep -a -q -F "$texto" "$exe" || { echo "el exe de Windows no trae: $texto"; exit 1; }
           done
           echo "la marca está en el exe de Windows"
