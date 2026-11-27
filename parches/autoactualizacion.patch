@@ -310,10 +310,10 @@ index 0000000..9e016f4
 +})
 diff --git a/packages/cli/src/services/solucode-updater.ts b/packages/cli/src/services/solucode-updater.ts
 new file mode 100644
-index 0000000..8442d41
+index 0000000..afc5345
 --- /dev/null
 +++ b/packages/cli/src/services/solucode-updater.ts
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,215 @@
 +export * as SolucodeUpdater from "./solucode-updater"
 +
 +import { Global } from "@opencode/util/global"
@@ -508,16 +508,22 @@ index 0000000..8442d41
 +    path.dirname(executable),
 +    `opencode-upgrade-${process.pid}-${randomBytes(4).toString("hex")}.exe`,
 +  )
-+  // Keep a second link before atomically replacing the path: a crash never removes the old command.
++  // Windows can replace a plain runtime atomically, but Bun's compiled bundle keeps its file mapped.
++  // Renaming that image first is supported; never interrupt the promotion or its rollback halfway through.
 +  yield* Effect.uninterruptible(
 +    Effect.gen(function* () {
 +      yield* fs.link(executable, backup)
 +      const result = yield* fs.rename(candidate, executable).pipe(Effect.option)
 +      if (Option.isNone(result)) {
-+        yield* fs.remove(backup).pipe(Effect.ignore)
-+        return yield* Effect.fail(
-+          new Error("Windows no permitió activar la actualización; se conservó la versión anterior"),
-+        )
++        yield* fs.remove(backup)
++        yield* fs.rename(executable, backup)
++        const promoted = yield* fs.rename(candidate, executable).pipe(Effect.option)
++        if (Option.isNone(promoted)) {
++          yield* fs.rename(backup, executable)
++          return yield* Effect.fail(
++            new Error("Windows no permitió activar la actualización; se conservó la versión anterior"),
++          )
++        }
 +      }
 +      yield* fs.remove(backup).pipe(Effect.ignore)
 +    }),
@@ -680,10 +686,10 @@ index 0000000..b7ed92a
 +})
 diff --git a/packages/cli/test/solucode-updater.test.ts b/packages/cli/test/solucode-updater.test.ts
 new file mode 100644
-index 0000000..1c138ad
+index 0000000..ac77ad6
 --- /dev/null
 +++ b/packages/cli/test/solucode-updater.test.ts
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,269 @@
 +import { NodeFileSystem } from "@effect/platform-node"
 +import { expect, test } from "bun:test"
 +import { Effect } from "effect"
@@ -693,6 +699,7 @@ index 0000000..1c138ad
 +import path from "node:path"
 +import { crc32 } from "node:zlib"
 +import { SolucodeUpdater } from "../src/services/solucode-updater"
++import { isolatedEnv } from "./fixture/environment"
 +
 +const approved = {
 +  version: "2.4.2-solucode.3",
@@ -827,32 +834,127 @@ index 0000000..1c138ad
 +    const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-running-update-"))
 +    const executable = path.join(root, "solucode.exe")
 +    const candidate = path.join(root, "new.exe")
-+    const retained = path.join(root, "retained.exe")
 +    const script = path.join(root, "alive.ts")
-+    await fs.copyFile(process.execPath, executable)
-+    await fs.copyFile(process.execPath, candidate)
-+    await fs.appendFile(candidate, "solucode-updated-fixture")
-+    await fs.link(executable, retained)
 +    await fs.writeFile(
 +      script,
-+      'console.log("ready"); for await (const data of Bun.stdin.stream()) { console.log(new TextDecoder().decode(data).trim()) }',
++      'if (process.argv.includes("--version")) { console.log("solucode v2.4.2-solucode.3 (basado en OpenCode 2.4.2)"); process.exit(0) }; console.log("ready"); for await (const data of Bun.stdin.stream()) { console.log(new TextDecoder().decode(data).trim()) }',
 +    )
-+    const child = Bun.spawn([executable, script], { stdin: "pipe", stdout: "pipe", stderr: "pipe", windowsHide: true })
++    // A compiled bundle keeps its own image mapped; copying bun.exe does not exercise that restriction.
++    const build = await Bun.build({
++      entrypoints: [script],
++      target: "bun",
++      format: "esm",
++      minify: true,
++      bytecode: true,
++      splitting: true,
++      compile: { outfile: executable, autoloadBunfig: false },
++    })
++    expect(build.success).toBe(true)
++    await fs.copyFile(executable, candidate)
++    await fs.appendFile(candidate, "solucode-updated-fixture")
++    const child = Bun.spawn([executable], {
++      cwd: root,
++      stdin: "pipe",
++      stdout: "pipe",
++      stderr: "pipe",
++      windowsHide: true,
++    })
++    const stderr = new Response(child.stderr).text()
 +    const reader = child.stdout.getReader()
 +    try {
-+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("ready")
++      const ready = await reader.read()
++      if (ready.done) throw new Error(await stderr)
++      expect(new TextDecoder().decode(ready.value)).toContain("ready")
 +      const expected = hash(await fs.readFile(candidate))
 +      await Effect.runPromise(SolucodeUpdater.replace(candidate, executable).pipe(Effect.provide(NodeFileSystem.layer)))
 +      expect(hash(await fs.readFile(executable))).toBe(expected)
 +      child.stdin.write("still alive\n")
 +      child.stdin.flush()
 +      expect(new TextDecoder().decode((await reader.read()).value)).toContain("still alive")
-+      const next = Bun.spawn([executable, "--version"], { stdout: "pipe", stderr: "pipe", windowsHide: true })
++      const next = Bun.spawn([executable, "--version"], {
++        cwd: root,
++        stdout: "pipe",
++        stderr: "pipe",
++        windowsHide: true,
++      })
 +      expect(await next.exited).toBe(0)
 +    } finally {
 +      reader.releaseLock()
 +      child.stdin.end()
 +      await child.exited
++      await fs.rm(root, { recursive: true, force: true })
++    }
++  },
++)
++
++test.skipIf(process.platform !== "win32" || !process.env.SOLUCODE_TEST_PREVIOUS_EXE)(
++  "promotes over the real SOLUCODE .2 release without interrupting its server and restores failed promotions",
++  async () => {
++    const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-release-update-"))
++    const executable = path.join(root, "solucode.exe")
++    const candidate = path.join(root, "candidate.exe")
++    await fs.copyFile(process.env.SOLUCODE_TEST_PREVIOUS_EXE!, executable)
++    await fs.copyFile(executable, candidate)
++    await fs.appendFile(candidate, "solucode-release-test")
++    const original = hash(await fs.readFile(executable))
++    expect(original).toBe("325e1531ed5957730f2f37e3e2dfc77eed8c7331df501bb6e52d4ca46f523eba")
++    const expected = hash(await fs.readFile(candidate))
++    const child = Bun.spawn([executable, "serve", "--stdio", "--port", "0", "--hostname", "127.0.0.1"], {
++      cwd: root,
++      windowsHide: true,
++      stdin: "pipe",
++      stdout: "pipe",
++      stderr: "pipe",
++      env: isolatedEnv(root, {
++        USERPROFILE: root,
++        LOCALAPPDATA: path.join(root, "local"),
++        ProgramData: path.join(root, "program-data"),
++        PROGRAMDATA: path.join(root, "program-data"),
++        OPENCODE_PASSWORD: "release-test-only",
++        OPENCODE_DISABLE_AUTOUPDATE: "1",
++      }),
++    })
++    const stderr = new Response(child.stderr).text()
++    const reader = child.stdout.getReader()
++    try {
++      let output = ""
++      let url: string | undefined
++      while (!url) {
++        const next = await reader.read()
++        if (next.done) throw new Error(await stderr)
++        output += new TextDecoder().decode(next.value)
++        const line = output.split(/\r?\n/).find((line) => line.startsWith('{"url":'))
++        if (line) url = JSON.parse(line).url
++      }
++      const info = async () => {
++        const response = await fetch(`${url}/api/info`, {
++          headers: { Authorization: `Basic ${Buffer.from("opencode:release-test-only").toString("base64")}` },
++          signal: AbortSignal.timeout(5_000),
++        })
++        expect(response.ok).toBe(true)
++        return (await response.json()) as { version: string; pid: number }
++      }
++      const before = await info()
++      await expect(
++        Effect.runPromise(
++          SolucodeUpdater.replace(path.join(root, "missing.exe"), executable).pipe(
++            Effect.provide(NodeFileSystem.layer),
++          ),
++        ),
++      ).rejects.toThrow()
++      expect(hash(await fs.readFile(executable))).toBe(original)
++      expect((await info()).pid).toBe(child.pid)
++      await Effect.runPromise(SolucodeUpdater.replace(candidate, executable).pipe(Effect.provide(NodeFileSystem.layer)))
++      expect(hash(await fs.readFile(executable))).toBe(expected)
++      const after = await info()
++      expect(after.pid).toBe(child.pid)
++      expect(after.version).toBe(before.version)
++      expect(await SolucodeUpdater.binaryVersion(executable)).toBe("2.4.2")
++    } finally {
++      reader.releaseLock()
++      if (child.exitCode === null) child.stdin.end()
++      await child.exited
++      await stderr
 +      await fs.rm(root, { recursive: true, force: true })
 +    }
 +  },

@@ -62,7 +62,8 @@ un ZIP del release exacto de `vsaldana/solucode`, con una versión completa mayo
 Comprueba el SHA256, los tres archivos esperados, su integridad y la versión interna del ejecutable.
 Nunca ejecuta el instalador ni descarga una actualización de OpenCode original.
 
-El reemplazo conserva la imagen de los procesos abiertos y cambia la ruta del ejecutable de forma atómica.
+El reemplazo conserva la imagen de los procesos abiertos; si Windows exige renombrarla antes de promover
+el candidato, restaura la anterior si la promoción falla.
 La sesión actual continúa. Al reabrir se renueva el servicio solamente si no hay otros clientes, sesiones
 ni trabajos en curso. Si hay actividad o no se puede comprobar su estado, se conserva el servicio anterior
 y se avisa. Los errores de red, descarga o permisos dejan la versión anterior disponible y se reintentan.
