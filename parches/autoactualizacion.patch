@@ -1,0 +1,1334 @@
+diff --git a/packages/cli/src/commands/handlers/upgrade.ts b/packages/cli/src/commands/handlers/upgrade.ts
+index 755ef46..f80fc5e 100644
+--- a/packages/cli/src/commands/handlers/upgrade.ts
++++ b/packages/cli/src/commands/handlers/upgrade.ts
+@@ -5,6 +5,7 @@ import { Runtime } from "../../framework/runtime"
+ import { Updater } from "../../services/updater"
+ import { handlePromptErrors } from "../../ui/prompt"
+ import { OPENCODE_VERSION } from "../../version"
++import { SolucodeUpdater } from "../../services/solucode-updater"
+ import { stripVTControlCharacters } from "node:util"
+ 
+ export default Runtime.handler(
+@@ -12,34 +13,23 @@ export default Runtime.handler(
+   Effect.fn("cli.upgrade")(
+     function* (input) {
+       intro("SOLUCODE")
+-      log.info('Para actualizar SOLUCODE, vuelve a correr: irm https://router.conversus.digital/instalar.ps1 | iex')
+-      outro("Listo")
+-      if (Date.now() > 0) return
+       const updater = yield* Updater.Service
+-      const method = Option.getOrUndefined(input.method) ?? (yield* updater.method())
+-      if (!method)
+-        return yield* Effect.fail(
+-          (yield* updater.managed(Option.getOrUndefined(input.target))) ??
+-            new Error("Could not detect the installation method. Pass --method to choose how to upgrade OpenCode."),
+-        )
+-
+-      log.info(`Using method: ${method}`)
+-      const target = Option.getOrUndefined(input.target) ?? (yield* updater.latest(method))
++      const target = Option.getOrUndefined(input.target) ?? (yield* updater.latest())
+       const version = target.trim().replace(/^v/, "")
+-      if (version === OPENCODE_VERSION) {
+-        log.warn(`OpenCode upgrade skipped: ${version} is already installed`)
+-        outro("Done")
++      if (!SolucodeUpdater.newer(version, OPENCODE_VERSION)) {
++        log.info(`SOLUCODE ${OPENCODE_VERSION} ya está al día; no hay una versión aprobada más nueva`)
++        outro("Listo")
+         return
+       }
+ 
+-      log.info(`From ${OPENCODE_VERSION} → ${version}`)
++      log.info(`De ${OPENCODE_VERSION} a ${version}`)
+       const progress = spinner()
+-      progress.start("Upgrading...")
+-      yield* updater.upgrade(method, target).pipe(
+-        Effect.tap(() => Effect.sync(() => progress.stop("Upgrade complete"))),
+-        Effect.tapCause(() => Effect.sync(() => progress.stop("Upgrade failed", 1))),
++      progress.start("Descargando la versión aprobada de SOLUCODE...")
++      yield* updater.apply(version).pipe(
++        Effect.tap(() => Effect.sync(() => progress.stop("Actualización instalada"))),
++        Effect.tapCause(() => Effect.sync(() => progress.stop("No se pudo instalar la actualización", 1))),
+       )
+-      outro("Done")
++      outro("La nueva versión se usará al reabrir SOLUCODE")
+     },
+     (effect) =>
+       handlePromptErrors(
+diff --git a/packages/cli/src/index.ts b/packages/cli/src/index.ts
+index 5a39c07..c8a7919 100755
+--- a/packages/cli/src/index.ts
++++ b/packages/cli/src/index.ts
+@@ -140,7 +140,9 @@ Effect.gen(function* () {
+     local: OPENCODE_LOCAL,
+     args: loggedArgs,
+   })
+-  return yield* Runtime.run(Commands, Handlers, { version: `${OPENCODE_VERSION} (basado en OpenCode ${OPENCODE_VERSION})` })
++  return yield* Runtime.run(Commands, Handlers, {
++    version: `${OPENCODE_VERSION} (basado en OpenCode ${OPENCODE_VERSION.split("-solucode.")[0]})`,
++  })
+ }).pipe(
+   Effect.catchCause((cause) =>
+     Effect.logError("cli process failed", {
+diff --git a/packages/cli/src/server-process.ts b/packages/cli/src/server-process.ts
+index 1c40512..912a60c 100644
+--- a/packages/cli/src/server-process.ts
++++ b/packages/cli/src/server-process.ts
+@@ -19,6 +19,7 @@ import { ServiceRegistration } from "./services/service-registration"
+ import { RemoteTunnel } from "./services/remote-tunnel"
+ import { WebUi } from "./services/web-ui"
+ import { databasePath } from "./database-path"
++import path from "node:path"
+ 
+ export type Mode = "default" | "service" | "stdio"
+ 
+@@ -80,7 +81,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
+       Object.assign(process.env, ServiceConfig.processEnv(config.env))
+       // Keep a package-manager or curl install replaceable while the service runs; Desktop updates its own copy.
+       if (options.mode === "service" && process.platform === "win32" && RetainedImage.installed(global.home))
+-        yield* RetainedImage.retain(global.cache, "service")
++        yield* RetainedImage.retain(path.dirname(process.execPath), "service")
+       const { start } = yield* Effect.promise(() => import("@opencode/server/process"))
+       const environmentPassword = yield* Env.password
+       // Keep the lease credential out of the environment inherited by tools.
+diff --git a/packages/cli/src/services/retained-image.ts b/packages/cli/src/services/retained-image.ts
+index ef1521a..b290daa 100644
+--- a/packages/cli/src/services/retained-image.ts
++++ b/packages/cli/src/services/retained-image.ts
+@@ -59,6 +59,8 @@ export function installed(home: string) {
+   if (runtime === "bun" || runtime === "node" || runtime === "nodejs") return false
+   const executable = path.resolve(process.execPath)
+   return (
++    (process.env.LOCALAPPDATA !== undefined &&
++      executable.toLowerCase() === path.resolve(process.env.LOCALAPPDATA, "solucode", "solucode.exe").toLowerCase()) ||
+     executable.split(path.sep).includes("node_modules") ||
+     /[\\/]winget[\\/]packages[\\/]/i.test(executable) ||
+     executable === path.resolve(home, ".opencode", "bin", "opencode.exe")
+diff --git a/packages/cli/src/services/server-connection.ts b/packages/cli/src/services/server-connection.ts
+index bb18f10..eaf8def 100644
+--- a/packages/cli/src/services/server-connection.ts
++++ b/packages/cli/src/services/server-connection.ts
+@@ -7,6 +7,8 @@ import { Env } from "../env"
+ import { ServiceConfig } from "./service-config"
+ import { start } from "./standalone"
+ import { errorMessage } from "../util/error"
++import { SolucodeUpdater } from "./solucode-updater"
++import { SolucodeService } from "./solucode-service"
+ 
+ export type Args = {
+   readonly server?: string
+@@ -55,7 +57,10 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
+   const mismatch = args.mismatch ?? "ignore"
+   const options = yield* ServiceConfig.options({ checkVersion: mismatch !== "ignore" })
+   if (args.autostart === false) {
+-    const endpoint = yield* Service.discover({ ...options, version: undefined })
++    const discover = Service.discover({ ...options, version: undefined })
++    const endpoint = yield* process.platform === "win32" && SolucodeUpdater.installed() && options.file
++      ? SolucodeService.lock(options.file, discover)
++      : discover
+     if (!endpoint) return { endpoint: yield* start(), standalone: true } satisfies Resolved
+     return { endpoint, service: managedService(options) } satisfies Resolved
+   }
+@@ -87,6 +92,12 @@ export const shutdownPersistentPty = Effect.fn("cli.server-connection.shutdown-p
+ })
+ 
+ const resolveManaged = Effect.fnUntraced(function* (options: EnsureOptions, mismatch: NonNullable<Args["mismatch"]>) {
++  if (mismatch !== "error" && process.platform === "win32" && SolucodeUpdater.installed() && options.file) {
++    return yield* SolucodeService.lock(
++      options.file,
++      mismatch === "replace" ? SolucodeService.ensure(options) : Service.ensure({ ...options, version: undefined }),
++    )
++  }
+   if (mismatch === "replace") return yield* Service.ensure(options)
+   if (mismatch === "ignore") return yield* Service.ensure({ ...options, version: undefined })
+ 
+diff --git a/packages/cli/src/services/solucode-archive.ts b/packages/cli/src/services/solucode-archive.ts
+new file mode 100644
+index 0000000..3224ef5
+--- /dev/null
++++ b/packages/cli/src/services/solucode-archive.ts
+@@ -0,0 +1,42 @@
++import { crc32, inflateRawSync } from "node:zlib"
++
++/** Read only the three flat files published by the SOLUCODE build, never archive paths. */
++export function executableFromZip(input: Uint8Array) {
++  const zip = Buffer.from(input.buffer, input.byteOffset, input.byteLength)
++  const end = zip.length - 22
++  if (end < 0 || zip.readUInt32LE(end) !== 0x06054b50) throw new Error("ZIP de SOLUCODE inválido")
++  if (zip.readUInt32LE(end + 4) !== 0 || zip.readUInt16LE(end + 8) !== 3 || zip.readUInt16LE(end + 10) !== 3)
++    throw new Error("El ZIP debe contener exactamente tres archivos")
++  const offset = zip.readUInt32LE(end + 16)
++  if (offset + zip.readUInt32LE(end + 12) !== end) throw new Error("Directorio ZIP inválido")
++  const names = new Set(["solucode.exe", "LICENSE", "NOTICE"])
++  let entry = offset
++  let executable: Uint8Array | undefined
++  for (let index = 0; index < 3; index++) {
++    if (zip.readUInt32LE(entry) !== 0x02014b50) throw new Error("Entrada ZIP inválida")
++    const flags = zip.readUInt16LE(entry + 8)
++    const method = zip.readUInt16LE(entry + 10)
++    const compressed = zip.readUInt32LE(entry + 20)
++    const length = zip.readUInt32LE(entry + 24)
++    const nameLength = zip.readUInt16LE(entry + 28)
++    const name = zip.subarray(entry + 46, entry + 46 + nameLength).toString("utf8")
++    const local = zip.readUInt32LE(entry + 42)
++    if (!names.delete(name) || flags & 1 || (method !== 0 && method !== 8) || length > 512 * 1024 * 1024)
++      throw new Error("Contenido ZIP no permitido")
++    if (zip.readUInt32LE(local) !== 0x04034b50 || zip.readUInt16LE(local + 8) !== method)
++      throw new Error("Cabecera ZIP inválida")
++    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28)
++    if (start + compressed > offset) throw new Error("Archivo ZIP truncado")
++    const content =
++      method === 0
++        ? zip.subarray(start, start + compressed)
++        : inflateRawSync(zip.subarray(start, start + compressed), { maxOutputLength: Math.max(1, length) })
++    if (content.length !== length || crc32(content) !== zip.readUInt32LE(entry + 16))
++      throw new Error("Archivo ZIP corrupto")
++    if (name === "solucode.exe") executable = content
++    entry += 46 + nameLength + zip.readUInt16LE(entry + 30) + zip.readUInt16LE(entry + 32)
++  }
++  if (entry !== end || !executable || executable[0] !== 0x4d || executable[1] !== 0x5a)
++    throw new Error("El ZIP no contiene un ejecutable Windows válido")
++  return executable
++}
+diff --git a/packages/cli/src/services/solucode-service.ts b/packages/cli/src/services/solucode-service.ts
+new file mode 100644
+index 0000000..9e016f4
+--- /dev/null
++++ b/packages/cli/src/services/solucode-service.ts
+@@ -0,0 +1,112 @@
++export * as SolucodeService from "./solucode-service"
++
++import { Service, type EnsureOptions } from "@opencode/client/effect/service"
++import { OpenCode } from "@opencode/client/promise"
++import { Flock } from "@opencode/util/flock"
++import { Effect, FileSystem, Option, Schedule, Schema } from "effect"
++import path from "node:path"
++
++/** Serialize new attachments with replacement so another new CLI cannot attach during the idle check. */
++class ServiceLockBusy extends Error {}
++export const lock = <A, E, R>(file: string, effect: Effect.Effect<A, E, R>) =>
++  Effect.acquireUseRelease(
++    Effect.tryPromise((signal) =>
++      Flock.acquire("solucode-service", {
++        dir: path.join(path.dirname(file), "locks"),
++        signal,
++        timeoutMs: 500,
++        maxDelayMs: 100,
++      }),
++    ).pipe(
++      Effect.mapError((cause) =>
++        cause.cause instanceof Error && cause.cause.message.startsWith("Timed out waiting for lock:")
++          ? new ServiceLockBusy(cause.cause.message)
++          : cause,
++      ),
++    ),
++    () => effect,
++    (lease) => Effect.promise(() => lease.release()),
++  ).pipe(
++    Effect.retry({
++      // Each acquisition is bounded; between attempts cancellation can close a waiting TUI immediately.
++      while: (cause) => cause instanceof ServiceLockBusy,
++      schedule: Schedule.spaced("100 millis").pipe(Schedule.upTo({ duration: "2 minutes" })),
++    }),
++  )
++
++/** Inspect native processes only on a version mismatch, including clients from releases without lease files. */
++export async function otherClients() {
++  const script = `$ErrorActionPreference = 'Stop'
++$clients = @(Get-CimInstance Win32_Process -Filter "Name = 'solucode.exe' OR Name = 'opencode.exe' OR Name LIKE 'opencode-%'" | Where-Object {
++  $_.ProcessId -ne [int]$env:SOLUCODE_UPDATE_PID -and
++  (!$_.CommandLine -or $_.CommandLine -notmatch '\\bserve\\s+--service\\b')
++})
++if ($clients.Count -gt 0) { 'busy' } else { 'idle' }`
++  const child = Bun.spawn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], {
++    windowsHide: true,
++    env: { ...process.env, SOLUCODE_UPDATE_PID: String(process.pid) },
++    stdout: "pipe",
++    stderr: "pipe",
++    signal: AbortSignal.timeout(15_000),
++  })
++  const [text, , code] = await Promise.all([
++    new Response(child.stdout).text(),
++    new Response(child.stderr).text(),
++    child.exited,
++  ])
++  return code !== 0 || text.trim() !== "idle"
++}
++
++export const ensure = Effect.fnUntraced(function* (
++  options: EnsureOptions,
++  clients: () => Promise<boolean> = otherClients,
++) {
++  const fs = yield* FileSystem.FileSystem
++  const registered = options.file ? yield* fs.exists(options.file).pipe(Effect.orElseSucceed(() => true)) : false
++  const registration = options.file
++    ? yield* fs
++        .readFileString(options.file)
++        .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Service.Info))), Effect.option)
++    : Option.none()
++  const compatible = yield* Service.discover(options)
++  if (compatible) return compatible
++  const existing = yield* Service.discover({ ...options, version: undefined })
++  const attached = yield* Effect.tryPromise(clients).pipe(Effect.orElseSucceed(() => true))
++  if (!existing) {
++    const alive =
++      Option.isSome(registration) &&
++      (yield* Effect.try({
++        try: () => {
++          process.kill(registration.value.pid, 0)
++          return true
++        },
++        catch: (cause) => cause,
++      }).pipe(
++        Effect.catch((cause) => Effect.succeed(!(cause instanceof Error && "code" in cause && cause.code === "ESRCH"))),
++      ))
++    // A failed health check is not permission to kill an old service that still owns calls.
++    if (alive || (registered && Option.isNone(registration)))
++      return yield* Effect.fail(
++        new Error(
++          "El servicio anterior de SOLUCODE todavía está iniciando o no responde; vuelve a intentar sin cerrar tus otras sesiones",
++        ),
++      )
++    return yield* Service.ensure(options)
++  }
++  const client = OpenCode.make({ baseUrl: existing.url, headers: Service.headers(existing) })
++  const busy = yield* Effect.tryPromise(async () => {
++    if (attached) return true
++    const [sessions, jobs] = await Promise.all([
++      client.session.active({ signal: AbortSignal.timeout(5_000) }),
++      client.experimental.job.list({ status: "running" }, { signal: AbortSignal.timeout(5_000) }),
++    ])
++    return Object.keys(sessions).length > 0 || jobs.length > 0
++  }).pipe(Effect.orElseSucceed(() => true))
++  if (busy) {
++    process.stderr.write(
++      "SOLUCODE actualizado. El servicio anterior sigue activo para no interrumpir otras sesiones; se renovará al reabrir cuando estén libres.\n",
++    )
++    return existing
++  }
++  return yield* Service.ensure(options)
++})
+diff --git a/packages/cli/src/services/solucode-updater.ts b/packages/cli/src/services/solucode-updater.ts
+new file mode 100644
+index 0000000..e07755b
+--- /dev/null
++++ b/packages/cli/src/services/solucode-updater.ts
+@@ -0,0 +1,233 @@
++export * as SolucodeUpdater from "./solucode-updater"
++
++import { Global } from "@opencode/util/global"
++import { EffectFlock } from "@opencode/util/effect-flock"
++import { Effect, FileSystem, Option, Ref, Schema } from "effect"
++import { createHash, randomBytes } from "node:crypto"
++import path from "node:path"
++import { OPENCODE_LOCAL, OPENCODE_VERSION } from "../version"
++import { RetainedImage } from "./retained-image"
++import { executableFromZip } from "./solucode-archive"
++import { decodePolicy, type CheckResult, type Interface, type RunResult } from "./updater"
++
++export const manifestURL = "https://router.conversus.digital/solucode/actualizacion.json"
++const releaseRoot = "https://github.com/vsaldana/solucode/releases/download/"
++const Manifest = Schema.Struct({ version: Schema.String, url: Schema.String, sha256: Schema.String })
++export type Manifest = typeof Manifest.Type
++const decodeManifest = Schema.decodeUnknownSync(Manifest)
++
++export function manifest(input: unknown): Manifest {
++  const value = decodeManifest(input)
++  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-solucode\.(0|[1-9]\d*)$/.test(value.version))
++    throw new Error("Versión SOLUCODE inválida")
++  if (value.url !== `${releaseRoot}v${value.version}/solucode-windows-x64.zip`)
++    throw new Error("La actualización no pertenece al release aprobado de SOLUCODE")
++  if (!/^[a-f0-9]{64}$/.test(value.sha256)) throw new Error("SHA256 inválido")
++  return value
++}
++
++export function installed(executable = process.execPath, local = process.env.LOCALAPPDATA) {
++  return (
++    local !== undefined &&
++    path.resolve(executable).toLowerCase() === path.resolve(local, "solucode", "solucode.exe").toLowerCase()
++  )
++}
++
++/** Numeric SOLUCODE revision ordering, including .10 after .9; bare versions are legacy .0. */
++export function newer(candidate: string, current: string) {
++  const parts = (version: string) =>
++    /^(\d+)\.(\d+)\.(\d+)(?:-solucode\.(\d+))?$/
++      .exec(version)
++      ?.slice(1)
++      .map((part) => BigInt(part ?? "0"))
++  const next = parts(candidate)
++  const previous = parts(current)
++  if (!next || !previous) return false
++  const index = next.findIndex((part, index) => part !== previous[index])
++  return index !== -1 && next[index] > previous[index]
++}
++
++export async function binaryVersion(executable: string) {
++  const child = Bun.spawn([executable, "--version"], {
++    stdout: "pipe",
++    stderr: "pipe",
++    windowsHide: true,
++    signal: AbortSignal.timeout(30_000),
++  })
++  const [stdout, stderr, code] = await Promise.all([
++    new Response(child.stdout).text(),
++    new Response(child.stderr).text(),
++    child.exited,
++  ])
++  const version = /^solucode v(\d+\.\d+\.\d+(?:-solucode\.\d+)?)\s/.exec(stdout.trim())?.[1]
++  if (code !== 0 || !version) throw new Error(`No se pudo validar la versión del ejecutable: ${stderr.slice(-500)}`)
++  return version
++}
++
++export function verify(bytes: Uint8Array, expected: string) {
++  if (createHash("sha256").update(bytes).digest("hex") !== expected)
++    throw new Error("El SHA256 de la descarga no coincide con el aprobado por el router")
++  return executableFromZip(bytes)
++}
++
++const error = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)))
++
++/** Construction dependencies for an isolated host; the CLI always uses the production defaults below. */
++export const create = (
++  input: {
++    executable?: string
++    version?: string
++    local?: boolean
++    localAppData?: string
++    managedConfig?: string
++    request?: (url: string, options?: RequestInit) => Promise<Response>
++  } = {},
++) =>
++  Effect.gen(function* () {
++    const fs = yield* FileSystem.FileSystem
++    const global = yield* Global.Service
++    const flock = yield* EffectFlock.Service
++    const runningVersion = input.version ?? OPENCODE_VERSION
++    const current = yield* Ref.make(runningVersion)
++    const executable = path.resolve(input.executable ?? process.execPath)
++    const directory = path.dirname(executable)
++    const eligible =
++      !(input.local ?? OPENCODE_LOCAL) &&
++      process.platform === "win32" &&
++      installed(executable, input.localAppData ?? process.env.LOCALAPPDATA)
++    const request = input.request ?? fetch
++    const unavailable =
++      "Para actualizar SOLUCODE, vuelve a correr: irm https://router.conversus.digital/instalar.ps1 | iex"
++    const approved = () =>
++      Effect.tryPromise({
++        try: async (signal) => {
++          const response = await request(manifestURL, {
++            signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
++            redirect: "error",
++            cache: "no-store",
++          })
++          if (!response.ok) throw new Error(`No se pudo consultar la versión aprobada (${response.status})`)
++          const text = await response.text()
++          if (text.length > 4096) throw new Error("Manifiesto demasiado grande")
++          return manifest(JSON.parse(text))
++        },
++        catch: error,
++      })
++    const policy = Effect.fnUntraced(function* () {
++      const files = [
++        ...["config.json", "opencode.json", "opencode.jsonc"].map((name) => path.join(global.config, name)),
++        input.managedConfig ?? path.join(process.env.ProgramData ?? "C:\\ProgramData", "opencode", "opencode.jsonc"),
++      ]
++      const values = yield* Effect.forEach(files, (file) =>
++        fs.readFileString(file).pipe(
++          Effect.map(decodePolicy),
++          Effect.orElseSucceed(() => undefined),
++        ),
++      )
++      return values.findLast((value) => value !== undefined) ?? "auto"
++    })
++    const apply = Effect.fn("solucode.updater.apply")(function* (version: string) {
++      if (!eligible) return yield* Effect.fail(new Error(unavailable))
++      yield* Effect.scoped(
++        Effect.gen(function* () {
++          // Another TUI may be downloading. Never hold this TUI's shutdown waiting for that installation.
++          yield* flock.acquire("cli-upgrade", undefined, { timeoutMs: 500 })
++          // Re-fetch under the install lock: a previous dialog must not install a withdrawn release.
++          const release = yield* approved()
++          if (version !== release.version)
++            return yield* Effect.fail(new Error("La versión aprobada cambió; vuelve a comprobarla"))
++          const previous = yield* Effect.tryPromise({ try: () => binaryVersion(executable), catch: error })
++          if (!newer(version, previous)) {
++            yield* Ref.set(current, previous)
++            return
++          }
++          const stage = yield* fs.makeTempDirectoryScoped({ directory, prefix: ".solucode-update-" })
++          const bytes = yield* Effect.tryPromise({
++            try: async (signal) => {
++              const response = await request(release.url, {
++                signal: AbortSignal.any([signal, AbortSignal.timeout(5 * 60_000)]),
++              })
++              if (!response.ok) throw new Error(`No se pudo descargar SOLUCODE (${response.status})`)
++              if (Number(response.headers.get("content-length")) > 512 * 1024 * 1024)
++                throw new Error("Descarga demasiado grande")
++              const data = new Uint8Array(await response.arrayBuffer())
++              if (data.length > 512 * 1024 * 1024) throw new Error("Descarga demasiado grande")
++              return verify(data, release.sha256)
++            },
++            catch: error,
++          })
++          const candidate = path.join(stage, "solucode.exe")
++          yield* fs.writeFile(candidate, bytes)
++          const built = yield* Effect.tryPromise({ try: () => binaryVersion(candidate), catch: error })
++          if (built !== release.version)
++            return yield* Effect.fail(new Error("La versión del ejecutable no coincide con el manifiesto"))
++          const retained = yield* RetainedImage.retain(directory, "upgrade")
++          if (!retained)
++            return yield* Effect.fail(new Error("No se pudo conservar el ejecutable en uso; se reintentará más tarde"))
++          yield* replace(candidate, executable)
++          yield* Ref.set(current, version)
++        }),
++      ).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.mapError(error))
++    })
++    const check = Effect.fn("solucode.updater.check")(function* (): Effect.fn.Return<CheckResult | undefined, Error> {
++      if (!eligible) return { type: "unavailable", message: unavailable }
++      const release = yield* approved()
++      const version = yield* Ref.get(current)
++      if (newer(release.version, version)) return { type: "available", version: release.version }
++      if (version !== runningVersion) return { type: "installed", version }
++    })
++    const run: Interface["run"] = (onInstall = () => {}) =>
++      Effect.gen(function* () {
++        if (!eligible || ["1", "true"].includes((process.env.OPENCODE_DISABLE_AUTOUPDATE ?? "").toLowerCase())) return
++        const mode = yield* policy()
++        if (mode === "disable") return
++        const result = yield* check()
++        if (!result || result.type !== "available") return result?.type === "installed" ? result : undefined
++        if (mode === "notify") return result
++        onInstall(result.version)
++        yield* apply(result.version)
++        return { type: "installed", version: yield* Ref.get(current) } satisfies RunResult
++      }).pipe(
++        Effect.catch((cause) =>
++          Effect.logWarning("No se pudo actualizar SOLUCODE; se reintentará", { cause }).pipe(Effect.as(undefined)),
++        ),
++      )
++    return {
++      run,
++      check,
++      apply,
++      latest: () => approved().pipe(Effect.map((value) => value.version)),
++      upgrade: (_method: unknown, version: string) => apply(version),
++    }
++  })
++
++export const make = create()
++
++/** Keep the old image recoverable until the complete replacement occupies the canonical path. */
++export const replace = Effect.fnUntraced(function* (candidate: string, executable: string) {
++  const fs = yield* FileSystem.FileSystem
++  const backup = path.join(
++    path.dirname(executable),
++    `opencode-upgrade-${process.pid}-${randomBytes(4).toString("hex")}.exe`,
++  )
++  // Windows can replace a plain runtime atomically, but Bun's compiled bundle keeps its file mapped.
++  // Renaming that image first is supported; never interrupt the promotion or its rollback halfway through.
++  yield* Effect.uninterruptible(
++    Effect.gen(function* () {
++      yield* fs.link(executable, backup)
++      const result = yield* fs.rename(candidate, executable).pipe(Effect.option)
++      if (Option.isNone(result)) {
++        yield* fs.remove(backup)
++        yield* fs.rename(executable, backup)
++        const promoted = yield* fs.rename(candidate, executable).pipe(Effect.option)
++        if (Option.isNone(promoted)) {
++          yield* fs.rename(backup, executable)
++          return yield* Effect.fail(
++            new Error("Windows no permitió activar la actualización; se conservó la versión anterior"),
++          )
++        }
++      }
++      yield* fs.remove(backup).pipe(Effect.ignore)
++    }),
++  )
++})
+diff --git a/packages/cli/src/services/updater.ts b/packages/cli/src/services/updater.ts
+index 1d4f8a5..a149b49 100644
+--- a/packages/cli/src/services/updater.ts
++++ b/packages/cli/src/services/updater.ts
+@@ -8,6 +8,7 @@ import { parse, type ParseError } from "jsonc-parser"
+ import path from "node:path"
+ import { stripVTControlCharacters } from "node:util"
+ import { RetainedImage } from "./retained-image"
++import { SolucodeUpdater } from "./solucode-updater"
+ import { action, parseReleaseVersion, type Policy } from "./updater-action"
+ import { errorMessage } from "../util/error"
+ 
+@@ -257,7 +258,10 @@ const make = Effect.gen(function* () {
+     if (installedWinget) return "winget"
+     if (!installedPackage || installedOwner) return
+ 
+-    const parts = executable.toLowerCase().split(path.sep).map((part) => part.replace(/^\./, ""))
++    const parts = executable
++      .toLowerCase()
++      .split(path.sep)
++      .map((part) => part.replace(/^\./, ""))
+     const checks: Array<{ method: Method; command: string[] }> = [
+       { method: "npm", command: [npm, "list", "-g", "--depth=0", ...npmPrefixArgs, installedPackage] },
+       { method: "pnpm", command: ["pnpm", "list", "-g", "--depth=0", installedPackage] },
+@@ -705,13 +709,9 @@ const make = Effect.gen(function* () {
+   )
+ 
+   const servicioOriginal = { run, check, apply, method, managed, latest, upgrade, removal }
+-  const mensajeSolucode = 'Para actualizar SOLUCODE, vuelve a correr: irm https://router.conversus.digital/instalar.ps1 | iex'
+   return Service.of({
+     ...servicioOriginal,
+-    run: () => Effect.succeed(undefined),
+-    check: () => Effect.succeed({ type: "unavailable" as const, message: mensajeSolucode }),
+-    apply: () => Effect.fail(new Error(mensajeSolucode)),
+-    upgrade: () => Effect.fail(new Error(mensajeSolucode)),
++    ...(yield* SolucodeUpdater.make),
+   })
+ })
+ 
+diff --git a/packages/cli/test/solucode-service.test.ts b/packages/cli/test/solucode-service.test.ts
+new file mode 100644
+index 0000000..b7ed92a
+--- /dev/null
++++ b/packages/cli/test/solucode-service.test.ts
+@@ -0,0 +1,110 @@
++import { NodeFileSystem } from "@effect/platform-node"
++import { expect, test } from "bun:test"
++import { Effect } from "effect"
++import fs from "node:fs/promises"
++import os from "node:os"
++import path from "node:path"
++import { SolucodeService } from "../src/services/solucode-service"
++import { Flock } from "@opencode/util/flock"
++
++test("service attachments retry a contended lock and a waiting client can cancel", async () => {
++  const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-service-lock-"))
++  const file = path.join(root, "service.json")
++  const lease = await Flock.acquire("solucode-service", { dir: path.join(root, "locks") })
++  const controller = new AbortController()
++  let called = false
++  try {
++    const waiting = Effect.runPromise(
++      SolucodeService.lock(
++        file,
++        Effect.sync(() => {
++          called = true
++        }),
++      ),
++      { signal: controller.signal },
++    )
++    // Exercise a real acquisition timeout, then cancel while the other process still owns the lock.
++    const cancel = setTimeout(() => controller.abort(), 750)
++    await expect(waiting).rejects.toThrow()
++    clearTimeout(cancel)
++    expect(called).toBe(false)
++    await lease.release()
++    await Effect.runPromise(
++      SolucodeService.lock(
++        file,
++        Effect.sync(() => {
++          called = true
++        }),
++      ),
++    )
++    expect(called).toBe(true)
++  } finally {
++    await lease.release().catch(() => {})
++    await fs.rm(root, { recursive: true, force: true })
++  }
++})
++
++test("a reopened client keeps the previous service while another client, session or job is active", async () => {
++  const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-service-busy-"))
++  const file = path.join(root, "service.json")
++  // A dedicated child makes an accidental replacement kill only this fixture, never the test runner or user.
++  const script = path.join(root, "server.ts")
++  await fs.writeFile(
++    script,
++    `
++let state = "sessions"
++const server = Bun.serve({port:0, fetch(request) {
++  const url = new URL(request.url)
++  if (url.pathname === "/state") { state = url.searchParams.get("value"); return new Response("ok") }
++  if (state === "unready") return new Response("starting", {status:503})
++  if (url.pathname === "/api/session/active") return Response.json({data: state === "sessions" ? {"ses_fixture": {type:"running"}} : {}})
++  if (url.pathname === "/api/experimental/job") return Response.json({data: state === "jobs" ? [{id:"fixture",kind:"shell",sessionID:"ses_fixture",status:"running",time:{started:1},shellID:"shell",command:"fixture"}] : []})
++  return Response.json({version:"2.4.2-solucode.2", pid:process.pid, urls:[]})
++}})
++console.log(server.url.toString())
++for await (const _ of Bun.stdin.stream()) {}
++server.stop(true)
++`,
++  )
++  const child = Bun.spawn([process.execPath, script], {
++    stdin: "pipe",
++    stdout: "pipe",
++    stderr: "pipe",
++    windowsHide: true,
++  })
++  const reader = child.stdout.getReader()
++  try {
++    const url = new TextDecoder().decode((await reader.read()).value).trim()
++    await fs.writeFile(file, JSON.stringify({ url, pid: child.pid, version: "2.4.2-solucode.2" }))
++    const options = { file, version: "2.4.2-solucode.3", command: ["must-never-start"] }
++    const run = (clients: () => Promise<boolean>) =>
++      Effect.runPromise(
++        SolucodeService.lock(file, SolucodeService.ensure(options, clients)).pipe(Effect.provide(NodeFileSystem.layer)),
++      )
++    expect((await run(async () => false)).url).toBe(url)
++    await fetch(`${url}state?value=jobs`)
++    expect((await run(async () => false)).url).toBe(url)
++    await fetch(`${url}state?value=idle`)
++    expect((await run(async () => true)).url).toBe(url)
++    expect(
++      (
++        await run(async () => {
++          throw new Error("inspection unavailable")
++        })
++      ).url,
++    ).toBe(url)
++    await fetch(`${url}state?value=unready`)
++    await expect(run(async () => true)).rejects.toThrow("servicio anterior")
++    await expect(run(async () => false)).rejects.toThrow("servicio anterior")
++    await fetch(`${url}state?value=idle`)
++    expect((await fetch(url)).ok).toBe(true)
++    // Once every client and call is idle, replacement is permitted (the fixture command intentionally fails).
++    await expect(run(async () => false)).rejects.toThrow()
++    expect(await child.exited).not.toBeNull()
++  } finally {
++    reader.releaseLock()
++    if (child.exitCode === null) child.stdin.end()
++    await child.exited
++    await fs.rm(root, { recursive: true, force: true })
++  }
++})
+diff --git a/packages/cli/test/solucode-updater.test.ts b/packages/cli/test/solucode-updater.test.ts
+new file mode 100644
+index 0000000..15f0300
+--- /dev/null
++++ b/packages/cli/test/solucode-updater.test.ts
+@@ -0,0 +1,383 @@
++import { NodeFileSystem, NodeServices } from "@effect/platform-node"
++import { EffectFlock } from "@opencode/util/effect-flock"
++import { Global } from "@opencode/util/global"
++import { LayerNode } from "@opencode/util/effect/layer-node"
++import { expect, test } from "bun:test"
++import { Effect, Fiber } from "effect"
++import { createHash } from "node:crypto"
++import fs from "node:fs/promises"
++import os from "node:os"
++import path from "node:path"
++import { crc32 } from "node:zlib"
++import { SolucodeUpdater } from "../src/services/solucode-updater"
++import { isolatedEnv } from "./fixture/environment"
++import { withEnv } from "../../core/test/fixture/env"
++
++const approved = {
++  version: "2.4.2-solucode.3",
++  url: "https://github.com/vsaldana/solucode/releases/download/v2.4.2-solucode.3/solucode-windows-x64.zip",
++  sha256: "a".repeat(64),
++}
++
++test("accepts only the exact SOLUCODE repository, version, asset and SHA256", () => {
++  expect(SolucodeUpdater.manifest(approved)).toEqual(approved)
++  for (const update of [
++    { version: "2.4.2" },
++    { version: "2.4.2-solucode.03" },
++    { version: "v2.4.2-solucode.3" },
++    { url: approved.url.replace("vsaldana/solucode", "anomalyco/opencode") },
++    { url: approved.url.replace("solucode.3/", "solucode.2/") },
++    { url: `${approved.url}?redirect=other` },
++    { sha256: "x".repeat(64) },
++    { sha256: "a" },
++  ])
++    expect(() => SolucodeUpdater.manifest({ ...approved, ...update })).toThrow()
++})
++
++test("orders the full version numerically and never downgrades to a stale manifest", () => {
++  expect(SolucodeUpdater.newer("2.4.2-solucode.10", "2.4.2-solucode.9")).toBe(true)
++  expect(SolucodeUpdater.newer("2.4.2-solucode.3", "2.4.2")).toBe(true)
++  expect(SolucodeUpdater.newer("2.5.0-solucode.1", "2.4.2-solucode.99")).toBe(true)
++  expect(SolucodeUpdater.newer("2.4.2-solucode.3", "2.4.2-solucode.3")).toBe(false)
++  expect(SolucodeUpdater.newer("2.4.2-solucode.2", "2.4.2-solucode.3")).toBe(false)
++  expect(SolucodeUpdater.newer("2.4.2-solucode.99", "2.5.0-solucode.1")).toBe(false)
++  expect(SolucodeUpdater.newer("2.4.2-solucode.3", "unknown")).toBe(false)
++})
++
++test("owns only the production installation path", () => {
++  const local = path.join(os.tmpdir(), "local")
++  expect(SolucodeUpdater.installed(path.join(local, "solucode", "solucode.exe"), local)).toBe(true)
++  expect(SolucodeUpdater.installed(path.join(local, "opencode", "opencode.exe"), local)).toBe(false)
++  expect(SolucodeUpdater.installed(path.join(local, "solucode", "copy.exe"), local)).toBe(false)
++})
++
++function zip(
++  entries: Array<[string, string | Uint8Array]> = [
++    ["solucode.exe", "MZfixture"],
++    ["LICENSE", "MIT"],
++    ["NOTICE", "OpenCode"],
++  ],
++) {
++  const files: Buffer[] = []
++  const directory: Buffer[] = []
++  let offset = 0
++  for (const [name, content] of entries) {
++    const bytes = typeof content === "string" ? Buffer.from(content) : Buffer.from(content)
++    const local = Buffer.alloc(30 + name.length)
++    local.writeUInt32LE(0x04034b50)
++    local.writeUInt32LE(crc32(bytes), 14)
++    local.writeUInt32LE(bytes.length, 18)
++    local.writeUInt32LE(bytes.length, 22)
++    local.writeUInt16LE(name.length, 26)
++    local.write(name, 30)
++    const central = Buffer.alloc(46 + name.length)
++    central.writeUInt32LE(0x02014b50)
++    central.writeUInt32LE(crc32(bytes), 16)
++    central.writeUInt32LE(bytes.length, 20)
++    central.writeUInt32LE(bytes.length, 24)
++    central.writeUInt16LE(name.length, 28)
++    central.writeUInt32LE(offset, 42)
++    central.write(name, 46)
++    files.push(local, bytes)
++    directory.push(central)
++    offset += local.length + bytes.length
++  }
++  const end = Buffer.alloc(22)
++  end.writeUInt32LE(0x06054b50)
++  end.writeUInt16LE(entries.length, 8)
++  end.writeUInt16LE(entries.length, 10)
++  end.writeUInt32LE(
++    directory.reduce((size, entry) => size + entry.length, 0),
++    12,
++  )
++  end.writeUInt32LE(offset, 16)
++  return Buffer.concat([...files, ...directory, end])
++}
++const hash = (data: Uint8Array) => createHash("sha256").update(data).digest("hex")
++
++test.skipIf(process.platform !== "win32")(
++  "auto policy downloads only approved bytes, cancels safely and reports installed for the next opening",
++  async () => {
++    const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-auto-flow-"))
++    const local = path.join(root, "local")
++    const executable = path.join(local, "solucode", "solucode.exe")
++    const candidate = path.join(root, "candidate.exe")
++    const script = path.join(root, "version.ts")
++    const managed = path.join(root, "managed.jsonc")
++    const config = path.join(root, "config")
++    await fs.mkdir(path.dirname(executable), { recursive: true })
++    await fs.mkdir(config)
++    for (const [version, outfile] of [
++      ["2.4.2-solucode.2", executable],
++      [approved.version, candidate],
++    ]) {
++      await fs.writeFile(script, `console.log("solucode v${version} (basado en OpenCode 2.4.2)")`)
++      const build = await Bun.build({
++        entrypoints: [script],
++        target: "bun",
++        compile: { outfile, autoloadBunfig: false },
++      })
++      expect(build.success).toBe(true)
++    }
++    const previous = hash(await fs.readFile(executable))
++    const bytes = zip([
++      ["solucode.exe", await fs.readFile(candidate)],
++      ["LICENSE", "MIT"],
++      ["NOTICE", "OpenCode"],
++    ])
++    await fs.writeFile(path.join(config, "opencode.jsonc"), '{"update":"auto"}')
++    await fs.writeFile(managed, '{"update":"disable"}')
++    let mode = "bad"
++    const started = Promise.withResolvers<void>()
++    const release = Promise.withResolvers<void>()
++    const requests: string[] = []
++    const server = Bun.serve({
++      port: 0,
++      async fetch(request) {
++        if (new URL(request.url).pathname === "/manifest")
++          return Response.json({ ...approved, sha256: mode === "bad" ? "0".repeat(64) : hash(bytes) })
++        if (mode === "hold") {
++          started.resolve()
++          await release.promise
++        }
++        return new Response(bytes)
++      },
++    })
++    const layers = LayerNode.compile(LayerNode.group([Global.node, EffectFlock.node]), {
++      replacements: [Global.node.replace(Global.layerWith({ config, state: path.join(root, "state") }))],
++    })
++    try {
++      await Effect.runPromise(
++        withEnv({ OPENCODE_DISABLE_AUTOUPDATE: "0" }, () =>
++          Effect.gen(function* () {
++            const updater = yield* SolucodeUpdater.create({
++              executable,
++              version: "2.4.2-solucode.2",
++              local: false,
++              localAppData: local,
++              managedConfig: managed,
++              request: (url, options) => {
++                requests.push(url)
++                expect([SolucodeUpdater.manifestURL, approved.url]).toContain(url)
++                return fetch(new URL(url === SolucodeUpdater.manifestURL ? "/manifest" : "/zip", server.url), options)
++              },
++            })
++            expect(yield* updater.run()).toBeUndefined()
++            expect(requests).toHaveLength(0)
++            yield* Effect.promise(() => fs.writeFile(managed, '{"update":"notify"}'))
++            expect(yield* updater.run()).toEqual({ type: "available", version: approved.version })
++            expect(requests).toEqual([SolucodeUpdater.manifestURL])
++            yield* Effect.promise(() => fs.writeFile(managed, '{"update":"auto"}'))
++            // A bad approved hash never replaces the installed executable.
++            expect(yield* updater.run()).toBeUndefined()
++            expect(hash(yield* Effect.promise(() => fs.readFile(executable)))).toBe(previous)
++            mode = "hold"
++            const downloading = yield* Effect.forkScoped(updater.run())
++            yield* Effect.promise(() => started.promise)
++            yield* Fiber.interrupt(downloading)
++            release.resolve()
++            expect(hash(yield* Effect.promise(() => fs.readFile(executable)))).toBe(previous)
++            expect(
++              (yield* Effect.promise(() => fs.readdir(path.dirname(executable)))).some((name) =>
++                name.startsWith(".solucode-update-"),
++              ),
++            ).toBe(false)
++            mode = "good"
++            const installing: string[] = []
++            expect(yield* updater.run((version) => installing.push(version))).toEqual({
++              type: "installed",
++              version: approved.version,
++            })
++            expect(installing).toEqual([approved.version])
++            expect(yield* updater.check()).toEqual({ type: "installed", version: approved.version })
++            expect(yield* Effect.promise(() => SolucodeUpdater.binaryVersion(executable))).toBe(approved.version)
++            const downloads = requests.filter((url) => url === approved.url).length
++            expect(yield* updater.run()).toEqual({ type: "installed", version: approved.version })
++            expect(requests.filter((url) => url === approved.url)).toHaveLength(downloads)
++          }),
++        ).pipe(Effect.provide(layers), Effect.provide(NodeServices.layer), Effect.scoped),
++      )
++    } finally {
++      release.resolve()
++      await server.stop(true)
++      await fs.rm(root, { recursive: true, force: true })
++    }
++  },
++)
++
++test("verifies SHA256 before reading the ZIP and rejects corrupt or unexpected contents", () => {
++  const bytes = zip()
++  expect(Buffer.from(SolucodeUpdater.verify(bytes, hash(bytes))).toString()).toBe("MZfixture")
++  expect(() => SolucodeUpdater.verify(bytes, "0".repeat(64))).toThrow("SHA256")
++  for (const bad of [
++    zip([
++      ["../solucode.exe", "MZ"],
++      ["LICENSE", "MIT"],
++      ["NOTICE", "OC"],
++    ]),
++    zip([
++      ["solucode.exe", "MZ"],
++      ["solucode.exe", "MZ"],
++      ["NOTICE", "OC"],
++    ]),
++    zip([
++      ["solucode.exe", "shell script"],
++      ["LICENSE", "MIT"],
++      ["NOTICE", "OC"],
++    ]),
++    bytes.subarray(0, bytes.length - 1),
++  ])
++    expect(() => SolucodeUpdater.verify(bad, hash(bad))).toThrow()
++  const damaged = Buffer.from(bytes)
++  damaged[45] ^= 1
++  expect(() => SolucodeUpdater.verify(damaged, hash(damaged))).toThrow()
++})
++
++test("restores the old executable when replacement cannot be activated", async () => {
++  const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-recovery-"))
++  try {
++    const executable = path.join(root, "solucode.exe")
++    await fs.writeFile(executable, "original")
++    await expect(
++      Effect.runPromise(
++        SolucodeUpdater.replace(path.join(root, "missing.exe"), executable).pipe(Effect.provide(NodeFileSystem.layer)),
++      ),
++    ).rejects.toThrow()
++    expect(await fs.readFile(executable, "utf8")).toBe("original")
++    expect(await fs.readdir(root)).toEqual(["solucode.exe"])
++  } finally {
++    await fs.rm(root, { recursive: true, force: true })
++  }
++})
++
++test.skipIf(process.platform !== "win32")(
++  "replaces a real running Windows executable while its original process keeps answering",
++  async () => {
++    const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-running-update-"))
++    const executable = path.join(root, "solucode.exe")
++    const candidate = path.join(root, "new.exe")
++    const script = path.join(root, "alive.ts")
++    await fs.writeFile(
++      script,
++      'if (process.argv.includes("--version")) { console.log("solucode v2.4.2-solucode.3 (basado en OpenCode 2.4.2)"); process.exit(0) }; console.log("ready"); for await (const data of Bun.stdin.stream()) { console.log(new TextDecoder().decode(data).trim()) }',
++    )
++    // A compiled bundle keeps its own image mapped; copying bun.exe does not exercise that restriction.
++    const build = await Bun.build({
++      entrypoints: [script],
++      target: "bun",
++      format: "esm",
++      minify: true,
++      bytecode: true,
++      splitting: true,
++      compile: { outfile: executable, autoloadBunfig: false },
++    })
++    expect(build.success).toBe(true)
++    await fs.copyFile(executable, candidate)
++    await fs.appendFile(candidate, "solucode-updated-fixture")
++    const child = Bun.spawn([executable], {
++      cwd: root,
++      stdin: "pipe",
++      stdout: "pipe",
++      stderr: "pipe",
++      windowsHide: true,
++    })
++    const stderr = new Response(child.stderr).text()
++    const reader = child.stdout.getReader()
++    try {
++      const ready = await reader.read()
++      if (ready.done) throw new Error(await stderr)
++      expect(new TextDecoder().decode(ready.value)).toContain("ready")
++      const expected = hash(await fs.readFile(candidate))
++      await Effect.runPromise(SolucodeUpdater.replace(candidate, executable).pipe(Effect.provide(NodeFileSystem.layer)))
++      expect(hash(await fs.readFile(executable))).toBe(expected)
++      child.stdin.write("still alive\n")
++      child.stdin.flush()
++      expect(new TextDecoder().decode((await reader.read()).value)).toContain("still alive")
++      const next = Bun.spawn([executable, "--version"], {
++        cwd: root,
++        stdout: "pipe",
++        stderr: "pipe",
++        windowsHide: true,
++      })
++      expect(await next.exited).toBe(0)
++    } finally {
++      reader.releaseLock()
++      child.stdin.end()
++      await child.exited
++      await fs.rm(root, { recursive: true, force: true })
++    }
++  },
++)
++
++test.skipIf(process.platform !== "win32" || !process.env.SOLUCODE_TEST_PREVIOUS_EXE)(
++  "promotes over the real SOLUCODE .2 release without interrupting its server and restores failed promotions",
++  async () => {
++    const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-release-update-"))
++    const executable = path.join(root, "solucode.exe")
++    const candidate = path.join(root, "candidate.exe")
++    await fs.copyFile(process.env.SOLUCODE_TEST_PREVIOUS_EXE!, executable)
++    await fs.copyFile(executable, candidate)
++    await fs.appendFile(candidate, "solucode-release-test")
++    const original = hash(await fs.readFile(executable))
++    expect(original).toBe("325e1531ed5957730f2f37e3e2dfc77eed8c7331df501bb6e52d4ca46f523eba")
++    const expected = hash(await fs.readFile(candidate))
++    const child = Bun.spawn([executable, "serve", "--stdio", "--port", "0", "--hostname", "127.0.0.1"], {
++      cwd: root,
++      windowsHide: true,
++      stdin: "pipe",
++      stdout: "pipe",
++      stderr: "pipe",
++      env: isolatedEnv(root, {
++        USERPROFILE: root,
++        LOCALAPPDATA: path.join(root, "local"),
++        ProgramData: path.join(root, "program-data"),
++        PROGRAMDATA: path.join(root, "program-data"),
++        OPENCODE_PASSWORD: "release-test-only",
++        OPENCODE_DISABLE_AUTOUPDATE: "1",
++      }),
++    })
++    const stderr = new Response(child.stderr).text()
++    const reader = child.stdout.getReader()
++    try {
++      let output = ""
++      let url: string | undefined
++      while (!url) {
++        const next = await reader.read()
++        if (next.done) throw new Error(await stderr)
++        output += new TextDecoder().decode(next.value)
++        const line = output.split(/\r?\n/).find((line) => line.startsWith('{"url":'))
++        if (line) url = JSON.parse(line).url
++      }
++      const info = async () => {
++        const response = await fetch(`${url}/api/info`, {
++          headers: { Authorization: `Basic ${Buffer.from("opencode:release-test-only").toString("base64")}` },
++          signal: AbortSignal.timeout(5_000),
++        })
++        expect(response.ok).toBe(true)
++        return (await response.json()) as { version: string; pid: number }
++      }
++      const before = await info()
++      await expect(
++        Effect.runPromise(
++          SolucodeUpdater.replace(path.join(root, "missing.exe"), executable).pipe(
++            Effect.provide(NodeFileSystem.layer),
++          ),
++        ),
++      ).rejects.toThrow()
++      expect(hash(await fs.readFile(executable))).toBe(original)
++      expect((await info()).pid).toBe(child.pid)
++      await Effect.runPromise(SolucodeUpdater.replace(candidate, executable).pipe(Effect.provide(NodeFileSystem.layer)))
++      expect(hash(await fs.readFile(executable))).toBe(expected)
++      const after = await info()
++      expect(after.pid).toBe(child.pid)
++      expect(after.version).toBe(before.version)
++      expect(await SolucodeUpdater.binaryVersion(executable)).toBe("2.4.2")
++    } finally {
++      reader.releaseLock()
++      if (child.exitCode === null) child.stdin.end()
++      await child.exited
++      await stderr
++      await fs.rm(root, { recursive: true, force: true })
++    }
++  },
++)
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 9571b8d..4d67be0 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -1103,7 +1103,7 @@ function App() {
+         ? [
+             {
+               name: "opencode.update",
+-              title: "Update OpenCode",
++              title: "Actualizar SOLUCODE",
+               slash: { name: "update" },
+               run: () => updater.open?.("manual"),
+               category: "System",
+diff --git a/packages/tui/src/component/dialog-update.tsx b/packages/tui/src/component/dialog-update.tsx
+index bd4a56c..fffd401 100644
+--- a/packages/tui/src/component/dialog-update.tsx
++++ b/packages/tui/src/component/dialog-update.tsx
+@@ -45,13 +45,13 @@ export function DialogUpdate(props: {
+     if (type === "installing") return []
+     const confirm =
+       type === "available"
+-        ? { label: "Update", run: props.install }
++        ? { label: "Actualizar", run: props.install }
+         : type === "installed"
+-          ? { label: "Restart", run: props.restart }
++          ? { label: "Cerrar SOLUCODE", run: props.restart }
+           : undefined
+     return [
+       {
+-        label: "Skip",
++        label: "Más tarde",
+         run: () => {
+           props.skip()
+           dialog.clear()
+@@ -71,11 +71,11 @@ export function DialogUpdate(props: {
+   Keymap.createLayer(() => ({
+     mode: "modal",
+     commands: [
+-      { bind: "return", title: "Confirm update action", group: "Dialog", run: () => void buttons()[active()]?.run() },
+-      { bind: "left", title: "Previous update action", group: "Dialog", run: () => move(-1) },
+-      { bind: "shift+tab", title: "Previous update action", group: "Dialog", run: () => move(-1) },
+-      { bind: "right", title: "Next update action", group: "Dialog", run: () => move(1) },
+-      { bind: "tab", title: "Next update action", group: "Dialog", run: () => move(1) },
++      { bind: "return", title: "Confirmar actualización", group: "Dialog", run: () => void buttons()[active()]?.run() },
++      { bind: "left", title: "Acción anterior", group: "Dialog", run: () => move(-1) },
++      { bind: "shift+tab", title: "Acción anterior", group: "Dialog", run: () => move(-1) },
++      { bind: "right", title: "Acción siguiente", group: "Dialog", run: () => move(1) },
++      { bind: "tab", title: "Acción siguiente", group: "Dialog", run: () => move(1) },
+     ],
+   }))
+ 
+@@ -85,10 +85,10 @@ export function DialogUpdate(props: {
+         <DialogHeader
+           title={
+             state().type === "installing"
+-              ? "Updating OpenCode"
++              ? "Actualizando SOLUCODE"
+               : state().type === "available" || state().type === "failed"
+-                ? "Update available"
+-                : "Update"
++                ? "Actualización disponible"
++                : "Actualización"
+           }
+         />
+       }
+@@ -106,25 +106,26 @@ export function DialogUpdate(props: {
+         {(current) => (
+           <Switch>
+             <Match when={current.type === "checking"}>
+-              <Spinner shimmer={theme.text.base}>Checking for updates…</Spinner>
++              <Spinner shimmer={theme.text.base}>Buscando actualizaciones…</Spinner>
+             </Match>
+             <Match when={current.type === "available"}>
+               <text fg={theme.text.muted}>
+-                An update is available. After installing, you'll be prompted to restart OpenCode.
++                Hay una versión aprobada disponible. Tras instalarla, se usará al cerrar y volver a abrir SOLUCODE.
+               </text>
+             </Match>
+             <Match when={current.type === "installing"}>
+               <Spinner shimmer={theme.text.base}>
+-                {current.type === "installing" ? `Installing OpenCode ${current.version}…` : ""}
++                {current.type === "installing" ? `Instalando SOLUCODE ${current.version}…` : ""}
+               </Spinner>
+             </Match>
+             <Match when={current.type === "installed"}>
+               <text fg={theme.text.muted} wrapMode="word">
+-                Update successful! Restart closes OpenCode, then run opencode to use the new version.
++                Actualización instalada. Puedes seguir trabajando; cierra SOLUCODE y ejecuta solucode de nuevo para
++                usarla.
+               </text>
+             </Match>
+             <Match when={current.type === "current"}>
+-              <text fg={theme.text.muted}>OpenCode is already up to date.</text>
++              <text fg={theme.text.muted}>SOLUCODE ya está al día.</text>
+             </Match>
+             <Match when={current.type === "unavailable"}>
+               <text fg={theme.text.muted} wrapMode="word">
+diff --git a/packages/tui/src/routes/home.tsx b/packages/tui/src/routes/home.tsx
+index 71e7b64..90e1a94 100644
+--- a/packages/tui/src/routes/home.tsx
++++ b/packages/tui/src/routes/home.tsx
+@@ -162,10 +162,10 @@ function UpdateNotification(props: { width: number }) {
+                   </span>
+                 </Show>
+                 {remote
+-                  ? "remote server update available"
++                  ? "actualización disponible en el servidor remoto"
+                   : state.type === "installed"
+-                    ? ` restart to use v${state.version}`
+-                    : ` to install v${state.version}`}
++                    ? ` cierra y vuelve a abrir para usar v${state.version}`
++                    : ` para instalar v${state.version}`}
+               </FadeInText>
+             </box>
+           </Show>
+diff --git a/packages/tui/src/util/presentation.ts b/packages/tui/src/util/presentation.ts
+index 2fc3e55..3c3a52d 100644
+--- a/packages/tui/src/util/presentation.ts
++++ b/packages/tui/src/util/presentation.ts
+@@ -34,7 +34,10 @@ export function epilogue(input: { readonly session?: SessionEpilogue; readonly u
+     `  ${dim}basado en OpenCode${reset}`,
+     "",
+     ...(input.updatedVersion
+-      ? [`  ${dim}Run ${reset}${bold}solucode${reset}${dim} to use ${reset}${bold}${input.updatedVersion}${reset}`, ""]
++      ? [
++          `  ${dim}Ejecuta ${reset}${bold}solucode${reset}${dim} para usar ${reset}${bold}${input.updatedVersion}${reset}`,
++          "",
++        ]
+       : []),
+     ...(input.session
+       ? [row("Session", input.session.title), row("Continue", `solucode -s ${input.session.sessionID}`), ""]
+diff --git a/packages/tui/test/component/dialog-update.test.tsx b/packages/tui/test/component/dialog-update.test.tsx
+index 60604b1..123f787 100644
+--- a/packages/tui/test/component/dialog-update.test.tsx
++++ b/packages/tui/test/component/dialog-update.test.tsx
+@@ -44,17 +44,17 @@ test("installation progress replaces checking while the update job is still pend
+ 
+   try {
+     app.renderer.start()
+-    await app.waitForFrame((frame) => frame.includes("Checking for updates"))
++    await app.waitForFrame((frame) => frame.includes("Buscando actualizaciones"))
+     setState({ type: "installing", version: "2.0.0" })
+     await app.waitForFrame(
+       (frame) =>
+-        frame.includes("Updating OpenCode") &&
+-        frame.includes("Installing OpenCode 2.0.0") &&
+-        !frame.includes("Checking"),
++        frame.includes("Actualizando SOLUCODE") &&
++        frame.includes("Instalando SOLUCODE 2.0.0") &&
++        !frame.includes("Buscando"),
+     )
+-    expect(app.captureCharFrame()).not.toContain("Skip")
++    expect(app.captureCharFrame()).not.toContain("Más tarde")
+     pending.reject(new Error("Update service unavailable"))
+-    await app.waitForFrame((frame) => frame.includes("Update service unavailable") && !frame.includes("Installing"))
++    await app.waitForFrame((frame) => frame.includes("Update service unavailable") && !frame.includes("Instalando"))
+   } finally {
+     pending.resolve(undefined)
+     app.renderer.destroy()
+@@ -91,9 +91,9 @@ test.each([false, true])("update choices are keyboard-navigable buttons with new
+ 
+   try {
+     app.renderer.start()
+-    await app.waitForFrame((frame) => frame.includes("Update available") && frame.includes("Skip"))
++    await app.waitForFrame((frame) => frame.includes("Actualización disponible") && frame.includes("Más tarde"))
+     const frame = app.captureCharFrame()
+-    expect(frame).toMatch(/Skip\s+Update/)
++    expect(frame).toMatch(/Más tarde\s+Actualizar/)
+     expect(frame).not.toContain("enter")
+ 
+     app.mockInput.pressArrow("left")
+@@ -109,3 +109,46 @@ function ModalUpdate(props: Parameters<typeof DialogUpdate>[0]) {
+   onCleanup(Keymap.use().mode.push("modal"))
+   return <DialogUpdate {...props} />
+ }
++
++test.each([44, 80])(
++  "an installed update explains reopening SOLUCODE and closes only on confirmation at width %p",
++  async (width) => {
++    await using temporary = await tmpdir()
++    let closed = 0
++    const app = await testRender(
++      () => (
++        <TestTuiContexts directory={temporary.path} paths={{ state: temporary.path }}>
++          <ConfigProvider config={createTuiResolvedConfig()}>
++            <ThemeProvider mode="dark" source={emptyThemeSource}>
++              <Keymap.Provider>
++                <ToastProvider>
++                  <DialogProvider>
++                    <ModalUpdate
++                      state={() => ({ type: "installed", version: "2.4.2-solucode.3" })}
++                      skip={() => {}}
++                      install={async () => {}}
++                      restart={() => {
++                        closed++
++                      }}
++                    />
++                  </DialogProvider>
++                </ToastProvider>
++              </Keymap.Provider>
++            </ThemeProvider>
++          </ConfigProvider>
++        </TestTuiContexts>
++      ),
++      { width, height: 24, kittyKeyboard: true },
++    )
++    try {
++      app.renderer.start()
++      await app.waitForFrame((frame) => frame.includes("Cerrar SOLUCODE"))
++      expect(app.captureCharFrame().replace(/\s+/g, " ")).toContain("ejecuta solucode de nuevo")
++      expect(closed).toBe(0)
++      app.mockInput.pressEnter()
++      await app.waitFor(() => closed === 1)
++    } finally {
++      app.renderer.destroy()
++    }
++  },
++)
+diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/util/presentation.test.ts
+index 474e86e..d8eaac0 100644
+--- a/packages/tui/test/util/presentation.test.ts
++++ b/packages/tui/test/util/presentation.test.ts
+@@ -19,13 +19,16 @@ test("formats session continuation summary", () => {
+ })
+ 
+ test("tells the user to start SOLUCODE again after an update", () => {
+-  expect(rows(epilogue({ updatedVersion: "2.0.0" }))).toEqual(["  basado en OpenCode", "  Run solucode to use 2.0.0"])
++  expect(rows(epilogue({ updatedVersion: "2.0.0" }))).toEqual([
++    "  basado en OpenCode",
++    "  Ejecuta solucode para usar 2.0.0",
++  ])
+ })
+ 
+ test("keeps the session continuation after an update", () => {
+   expect(rows(epilogue({ session: { title: "A session", sessionID: "ses_123" }, updatedVersion: "2.0.0" }))).toEqual([
+     "  basado en OpenCode",
+-    "  Run solucode to use 2.0.0",
++    "  Ejecuta solucode para usar 2.0.0",
+     "  Session   A session",
+     "  Continue  solucode -s ses_123",
+   ])

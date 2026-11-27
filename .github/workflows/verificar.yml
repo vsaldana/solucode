@@ -32,8 +32,16 @@ jobs:
         run: |
           python -m pip install setuptools
           bun install --frozen-lockfile
+      - name: Binario anterior para probar reemplazo Windows real
+        if: runner.os == 'Windows'
+        run: |
+          curl -fL --retry 3 https://github.com/vsaldana/solucode/releases/download/v2.4.2-solucode.2/solucode-windows-x64.zip -o previous.zip
+          echo '9bd8ed8eb6c1510b3d172b9a7d91242160a84b18cf1c50178f3e605b067b6b57  previous.zip' | sha256sum --check
+          unzip -q previous.zip -d previous
       - name: Pruebas y tipos
         working-directory: upstream
+        env:
+          SOLUCODE_TEST_PREVIOUS_EXE: ${{ runner.os == 'Windows' && format('{0}/previous/solucode.exe', github.workspace) || '' }}
         run: bash ../script/probar.sh
       - name: Revisión completa de OpenCode
         if: runner.os == 'Linux'

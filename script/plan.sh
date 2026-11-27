@@ -18,6 +18,7 @@ case "$GITHUB_EVENT_NAME" in
     salida modo tag
     salida compilar true
     salida version "$version"
+    salida solucode "${tag#v}"
     salida tag "$tag"
     salida publicar release
     ;;
@@ -27,6 +28,7 @@ case "$GITHUB_EVENT_NAME" in
     salida modo manual
     salida compilar true
     salida version "${version#v}"
+    salida solucode "${version#v}-solucode.$(tr -d '[:space:]' < REVISION)"
     salida tag ""
     salida publicar nada
     ;;
@@ -36,6 +38,7 @@ case "$GITHUB_EVENT_NAME" in
     ultima="${ultima#v}"
     salida modo semanal
     salida version "$ultima"
+    salida solucode "$ultima-solucode.1"
     if [ "$ultima" = "$actual" ]; then
       echo "OpenCode $ultima es la versión de SOLUCODE: no hay nada nuevo"
       salida compilar false

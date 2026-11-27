@@ -5,6 +5,7 @@ set -euo pipefail
 (cd packages/core && bun run script/test.ts test/generate.test.ts)
 (cd packages/tui && bun test --timeout 30000 --only-failures)
 (cd packages/protocol && bun test test/experimental-identifiers.test.ts)
-for paquete in core server protocol client tui; do
+(cd packages/cli && bun test --timeout 30000 test/solucode-updater.test.ts test/solucode-service.test.ts test/retained-image.test.ts test/server-connection.test.ts)
+for paquete in core server protocol client tui cli; do
   (cd "packages/$paquete" && bun run typecheck:tsc)
 done

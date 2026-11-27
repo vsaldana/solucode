@@ -5,9 +5,9 @@ SOLUCODE es OpenCode (licencia MIT, [anomalyco/opencode](https://github.com/anom
 Conserva la configuración (`%ProgramData%\opencode`, `~/.config/opencode`) y las variables `OPENCODE_*`. Los cambios están en `parches/`:
 
 - el logo dice SOLUCODE, con «basado en OpenCode» debajo;
-- el comando es `solucode`, y `solucode --version` dice `solucode v2.4.2 (basado en OpenCode 2.4.2)`;
+- el comando es `solucode`, y `solucode --version` dice `solucode v2.4.2-solucode.3 (basado en OpenCode 2.4.2)`;
 - el título de la ventana dice SOLUCODE;
-- no se actualiza solo ni baja OpenCode: `solucode upgrade` explica que se actualiza volviendo a correr el instalador.
+- mientras la terminal está abierta, descarga en segundo plano las versiones nuevas aprobadas por el router; quedan instaladas para la próxima apertura. `solucode upgrade` permite comprobar e instalar manualmente esa misma versión aprobada.
 - al terminar una respuesta, puede sugerir el próximo mensaje; Tab o flecha derecha lo copia al editor, donde se puede modificar antes de enviarlo con Enter. Escribir descarta la sugerencia.
 - los modelos del router no ofrecen selector ni comandos de esfuerzo; ese ajuste se administra en `router.conversus.digital`.
 
@@ -36,8 +36,10 @@ irm https://router.conversus.digital/instalar.ps1 | iex
 ## Cómo se arma
 
 - `VERSION` es la versión de OpenCode de la que parte SOLUCODE.
+- `REVISION` es la revisión SOLUCODE para compilaciones manuales; los releases usan el tag completo, también dentro del ejecutable y del servicio.
 - `script/aplicar.sh <versión> <carpeta>` trae OpenCode en esa versión y le aplica `parches/solucode.patch`. Si el parche ya no calza, prueba `parches/marca.py`, que hace los mismos cambios buscando los textos.
 - Después aplica obligatoriamente `parches/sugerencias.patch`; si no calza, falla y hay que adaptarlo. Usa una carpeta nueva: el guion no borra destinos existentes.
+- Aplica también `parches/autoactualizacion.patch`, con el cliente de actualizaciones y sus pruebas de Windows.
 - `script/probar.sh`, desde el clon con sus dependencias, regenera el cliente y prueba lógica, terminal, generación y tipos. `verificar.yml` lo hace en Linux y Windows; Linux ejecuta también `bun run check`.
 - `.github/workflows/compilar.yml` compila igual que el `build-cli` de OpenCode:
   - con un tag `v<versión>-solucode.<n>` publica el release con `solucode-windows-x64.zip`;
@@ -51,3 +53,24 @@ irm https://router.conversus.digital/instalar.ps1 | iex
 4. En conversusgo, cambia la versión fija del instalador del router (`apps/router`).
 
 El exe no está firmado con Authenticode: el de OpenCode lo firma OpenCode, y esta compilación no tiene su certificado.
+
+## Actualización aprobada por el router
+
+El cliente instalado en `%LOCALAPPDATA%\solucode\solucode.exe` consulta al abrir la TUI y cada diez minutos
+`https://router.conversus.digital/solucode/actualizacion.json`. Solo acepta `{version, url, sha256}` para
+un ZIP del release exacto de `vsaldana/solucode`, con una versión completa mayor que la instalada.
+Comprueba el SHA256, los tres archivos esperados, su integridad y la versión interna del ejecutable.
+Nunca ejecuta el instalador ni descarga una actualización de OpenCode original.
+
+El reemplazo conserva la imagen de los procesos abiertos; si Windows exige renombrarla antes de promover
+el candidato, restaura la anterior si la promoción falla.
+La sesión actual continúa. Al reabrir se renueva el servicio solamente si no hay otros clientes, sesiones
+ni trabajos en curso. Si hay actividad o no se puede comprobar su estado, se conserva el servicio anterior
+y se avisa. Los errores de red, descarga o permisos dejan la versión anterior disponible y se reintentan.
+El cierre de la TUI cancela una descarga en curso; la próxima apertura vuelve a comprobarla.
+
+La política `update` de `%ProgramData%\opencode\opencode.jsonc` prevalece sobre la del usuario;
+`auto`, `notify` y `disable` se respetan, al igual que `OPENCODE_DISABLE_AUTOUPDATE`.
+Para pasar desde `.2` o anteriores hay que ejecutar el instalador de producción una vez, porque esas
+versiones deshabilitaban la autoactualización. El router publica una versión solamente después de aprobar
+su release y hash. Las respuestas antiguas del manifiesto nunca provocan un downgrade.
