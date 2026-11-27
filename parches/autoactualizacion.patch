@@ -310,10 +310,10 @@ index 0000000..9e016f4
 +})
 diff --git a/packages/cli/src/services/solucode-updater.ts b/packages/cli/src/services/solucode-updater.ts
 new file mode 100644
-index 0000000..afc5345
+index 0000000..e07755b
 --- /dev/null
 +++ b/packages/cli/src/services/solucode-updater.ts
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,233 @@
 +export * as SolucodeUpdater from "./solucode-updater"
 +
 +import { Global } from "@opencode/util/global"
@@ -388,118 +388,136 @@ index 0000000..afc5345
 +
 +const error = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)))
 +
-+export const make = Effect.gen(function* () {
-+  const fs = yield* FileSystem.FileSystem
-+  const global = yield* Global.Service
-+  const flock = yield* EffectFlock.Service
-+  const current = yield* Ref.make(OPENCODE_VERSION)
-+  const executable = path.resolve(process.execPath)
-+  const directory = path.dirname(executable)
-+  const eligible = !OPENCODE_LOCAL && process.platform === "win32" && installed()
-+  const unavailable =
-+    "Para actualizar SOLUCODE, vuelve a correr: irm https://router.conversus.digital/instalar.ps1 | iex"
-+  const approved = () =>
-+    Effect.tryPromise({
-+      try: async (signal) => {
-+        const response = await fetch(manifestURL, {
-+          signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
-+          redirect: "error",
-+          cache: "no-store",
-+        })
-+        if (!response.ok) throw new Error(`No se pudo consultar la versión aprobada (${response.status})`)
-+        const text = await response.text()
-+        if (text.length > 4096) throw new Error("Manifiesto demasiado grande")
-+        return manifest(JSON.parse(text))
-+      },
-+      catch: error,
++/** Construction dependencies for an isolated host; the CLI always uses the production defaults below. */
++export const create = (
++  input: {
++    executable?: string
++    version?: string
++    local?: boolean
++    localAppData?: string
++    managedConfig?: string
++    request?: (url: string, options?: RequestInit) => Promise<Response>
++  } = {},
++) =>
++  Effect.gen(function* () {
++    const fs = yield* FileSystem.FileSystem
++    const global = yield* Global.Service
++    const flock = yield* EffectFlock.Service
++    const runningVersion = input.version ?? OPENCODE_VERSION
++    const current = yield* Ref.make(runningVersion)
++    const executable = path.resolve(input.executable ?? process.execPath)
++    const directory = path.dirname(executable)
++    const eligible =
++      !(input.local ?? OPENCODE_LOCAL) &&
++      process.platform === "win32" &&
++      installed(executable, input.localAppData ?? process.env.LOCALAPPDATA)
++    const request = input.request ?? fetch
++    const unavailable =
++      "Para actualizar SOLUCODE, vuelve a correr: irm https://router.conversus.digital/instalar.ps1 | iex"
++    const approved = () =>
++      Effect.tryPromise({
++        try: async (signal) => {
++          const response = await request(manifestURL, {
++            signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
++            redirect: "error",
++            cache: "no-store",
++          })
++          if (!response.ok) throw new Error(`No se pudo consultar la versión aprobada (${response.status})`)
++          const text = await response.text()
++          if (text.length > 4096) throw new Error("Manifiesto demasiado grande")
++          return manifest(JSON.parse(text))
++        },
++        catch: error,
++      })
++    const policy = Effect.fnUntraced(function* () {
++      const files = [
++        ...["config.json", "opencode.json", "opencode.jsonc"].map((name) => path.join(global.config, name)),
++        input.managedConfig ?? path.join(process.env.ProgramData ?? "C:\\ProgramData", "opencode", "opencode.jsonc"),
++      ]
++      const values = yield* Effect.forEach(files, (file) =>
++        fs.readFileString(file).pipe(
++          Effect.map(decodePolicy),
++          Effect.orElseSucceed(() => undefined),
++        ),
++      )
++      return values.findLast((value) => value !== undefined) ?? "auto"
 +    })
-+  const policy = Effect.fnUntraced(function* () {
-+    const files = [
-+      ...["config.json", "opencode.json", "opencode.jsonc"].map((name) => path.join(global.config, name)),
-+      path.join(process.env.ProgramData ?? "C:\\ProgramData", "opencode", "opencode.jsonc"),
-+    ]
-+    const values = yield* Effect.forEach(files, (file) =>
-+      fs.readFileString(file).pipe(
-+        Effect.map(decodePolicy),
-+        Effect.orElseSucceed(() => undefined),
-+      ),
-+    )
-+    return values.findLast((value) => value !== undefined) ?? "auto"
-+  })
-+  const apply = Effect.fn("solucode.updater.apply")(function* (version: string) {
-+    if (!eligible) return yield* Effect.fail(new Error(unavailable))
-+    yield* Effect.scoped(
++    const apply = Effect.fn("solucode.updater.apply")(function* (version: string) {
++      if (!eligible) return yield* Effect.fail(new Error(unavailable))
++      yield* Effect.scoped(
++        Effect.gen(function* () {
++          // Another TUI may be downloading. Never hold this TUI's shutdown waiting for that installation.
++          yield* flock.acquire("cli-upgrade", undefined, { timeoutMs: 500 })
++          // Re-fetch under the install lock: a previous dialog must not install a withdrawn release.
++          const release = yield* approved()
++          if (version !== release.version)
++            return yield* Effect.fail(new Error("La versión aprobada cambió; vuelve a comprobarla"))
++          const previous = yield* Effect.tryPromise({ try: () => binaryVersion(executable), catch: error })
++          if (!newer(version, previous)) {
++            yield* Ref.set(current, previous)
++            return
++          }
++          const stage = yield* fs.makeTempDirectoryScoped({ directory, prefix: ".solucode-update-" })
++          const bytes = yield* Effect.tryPromise({
++            try: async (signal) => {
++              const response = await request(release.url, {
++                signal: AbortSignal.any([signal, AbortSignal.timeout(5 * 60_000)]),
++              })
++              if (!response.ok) throw new Error(`No se pudo descargar SOLUCODE (${response.status})`)
++              if (Number(response.headers.get("content-length")) > 512 * 1024 * 1024)
++                throw new Error("Descarga demasiado grande")
++              const data = new Uint8Array(await response.arrayBuffer())
++              if (data.length > 512 * 1024 * 1024) throw new Error("Descarga demasiado grande")
++              return verify(data, release.sha256)
++            },
++            catch: error,
++          })
++          const candidate = path.join(stage, "solucode.exe")
++          yield* fs.writeFile(candidate, bytes)
++          const built = yield* Effect.tryPromise({ try: () => binaryVersion(candidate), catch: error })
++          if (built !== release.version)
++            return yield* Effect.fail(new Error("La versión del ejecutable no coincide con el manifiesto"))
++          const retained = yield* RetainedImage.retain(directory, "upgrade")
++          if (!retained)
++            return yield* Effect.fail(new Error("No se pudo conservar el ejecutable en uso; se reintentará más tarde"))
++          yield* replace(candidate, executable)
++          yield* Ref.set(current, version)
++        }),
++      ).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.mapError(error))
++    })
++    const check = Effect.fn("solucode.updater.check")(function* (): Effect.fn.Return<CheckResult | undefined, Error> {
++      if (!eligible) return { type: "unavailable", message: unavailable }
++      const release = yield* approved()
++      const version = yield* Ref.get(current)
++      if (newer(release.version, version)) return { type: "available", version: release.version }
++      if (version !== runningVersion) return { type: "installed", version }
++    })
++    const run: Interface["run"] = (onInstall = () => {}) =>
 +      Effect.gen(function* () {
-+        // Another TUI may be downloading. Never hold this TUI's shutdown waiting for that installation.
-+        yield* flock.acquire("cli-upgrade", undefined, { timeoutMs: 500 })
-+        // Re-fetch under the install lock: a previous dialog must not install a withdrawn release.
-+        const release = yield* approved()
-+        if (version !== release.version)
-+          return yield* Effect.fail(new Error("La versión aprobada cambió; vuelve a comprobarla"))
-+        const previous = yield* Effect.tryPromise({ try: () => binaryVersion(executable), catch: error })
-+        if (!newer(version, previous)) {
-+          yield* Ref.set(current, previous)
-+          return
-+        }
-+        const stage = yield* fs.makeTempDirectoryScoped({ directory, prefix: ".solucode-update-" })
-+        const bytes = yield* Effect.tryPromise({
-+          try: async (signal) => {
-+            const response = await fetch(release.url, {
-+              signal: AbortSignal.any([signal, AbortSignal.timeout(5 * 60_000)]),
-+            })
-+            if (!response.ok) throw new Error(`No se pudo descargar SOLUCODE (${response.status})`)
-+            if (Number(response.headers.get("content-length")) > 512 * 1024 * 1024)
-+              throw new Error("Descarga demasiado grande")
-+            const data = new Uint8Array(await response.arrayBuffer())
-+            if (data.length > 512 * 1024 * 1024) throw new Error("Descarga demasiado grande")
-+            return verify(data, release.sha256)
-+          },
-+          catch: error,
-+        })
-+        const candidate = path.join(stage, "solucode.exe")
-+        yield* fs.writeFile(candidate, bytes)
-+        const built = yield* Effect.tryPromise({ try: () => binaryVersion(candidate), catch: error })
-+        if (built !== release.version)
-+          return yield* Effect.fail(new Error("La versión del ejecutable no coincide con el manifiesto"))
-+        const retained = yield* RetainedImage.retain(directory, "upgrade")
-+        if (!retained)
-+          return yield* Effect.fail(new Error("No se pudo conservar el ejecutable en uso; se reintentará más tarde"))
-+        yield* replace(candidate, executable)
-+        yield* Ref.set(current, version)
-+      }),
-+    ).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.mapError(error))
++        if (!eligible || ["1", "true"].includes((process.env.OPENCODE_DISABLE_AUTOUPDATE ?? "").toLowerCase())) return
++        const mode = yield* policy()
++        if (mode === "disable") return
++        const result = yield* check()
++        if (!result || result.type !== "available") return result?.type === "installed" ? result : undefined
++        if (mode === "notify") return result
++        onInstall(result.version)
++        yield* apply(result.version)
++        return { type: "installed", version: yield* Ref.get(current) } satisfies RunResult
++      }).pipe(
++        Effect.catch((cause) =>
++          Effect.logWarning("No se pudo actualizar SOLUCODE; se reintentará", { cause }).pipe(Effect.as(undefined)),
++        ),
++      )
++    return {
++      run,
++      check,
++      apply,
++      latest: () => approved().pipe(Effect.map((value) => value.version)),
++      upgrade: (_method: unknown, version: string) => apply(version),
++    }
 +  })
-+  const check = Effect.fn("solucode.updater.check")(function* (): Effect.fn.Return<CheckResult | undefined, Error> {
-+    if (!eligible) return { type: "unavailable", message: unavailable }
-+    const release = yield* approved()
-+    const version = yield* Ref.get(current)
-+    if (newer(release.version, version)) return { type: "available", version: release.version }
-+    if (version !== OPENCODE_VERSION) return { type: "installed", version }
-+  })
-+  const run: Interface["run"] = (onInstall = () => {}) =>
-+    Effect.gen(function* () {
-+      if (!eligible || ["1", "true"].includes((process.env.OPENCODE_DISABLE_AUTOUPDATE ?? "").toLowerCase())) return
-+      const mode = yield* policy()
-+      if (mode === "disable") return
-+      const result = yield* check()
-+      if (!result || result.type !== "available") return result?.type === "installed" ? result : undefined
-+      if (mode === "notify") return result
-+      onInstall(result.version)
-+      yield* apply(result.version)
-+      return { type: "installed", version: yield* Ref.get(current) } satisfies RunResult
-+    }).pipe(
-+      Effect.catch((cause) =>
-+        Effect.logWarning("No se pudo actualizar SOLUCODE; se reintentará", { cause }).pipe(Effect.as(undefined)),
-+      ),
-+    )
-+  return {
-+    run,
-+    check,
-+    apply,
-+    latest: () => approved().pipe(Effect.map((value) => value.version)),
-+    upgrade: (_method: unknown, version: string) => apply(version),
-+  }
-+})
++
++export const make = create()
 +
 +/** Keep the old image recoverable until the complete replacement occupies the canonical path. */
 +export const replace = Effect.fnUntraced(function* (candidate: string, executable: string) {
@@ -686,13 +704,16 @@ index 0000000..b7ed92a
 +})
 diff --git a/packages/cli/test/solucode-updater.test.ts b/packages/cli/test/solucode-updater.test.ts
 new file mode 100644
-index 0000000..ac77ad6
+index 0000000..15f0300
 --- /dev/null
 +++ b/packages/cli/test/solucode-updater.test.ts
-@@ -0,0 +1,269 @@
-+import { NodeFileSystem } from "@effect/platform-node"
+@@ -0,0 +1,383 @@
++import { NodeFileSystem, NodeServices } from "@effect/platform-node"
++import { EffectFlock } from "@opencode/util/effect-flock"
++import { Global } from "@opencode/util/global"
++import { LayerNode } from "@opencode/util/effect/layer-node"
 +import { expect, test } from "bun:test"
-+import { Effect } from "effect"
++import { Effect, Fiber } from "effect"
 +import { createHash } from "node:crypto"
 +import fs from "node:fs/promises"
 +import os from "node:os"
@@ -700,6 +721,7 @@ index 0000000..ac77ad6
 +import { crc32 } from "node:zlib"
 +import { SolucodeUpdater } from "../src/services/solucode-updater"
 +import { isolatedEnv } from "./fixture/environment"
++import { withEnv } from "../../core/test/fixture/env"
 +
 +const approved = {
 +  version: "2.4.2-solucode.3",
@@ -740,7 +762,7 @@ index 0000000..ac77ad6
 +})
 +
 +function zip(
-+  entries = [
++  entries: Array<[string, string | Uint8Array]> = [
 +    ["solucode.exe", "MZfixture"],
 +    ["LICENSE", "MIT"],
 +    ["NOTICE", "OpenCode"],
@@ -750,7 +772,7 @@ index 0000000..ac77ad6
 +  const directory: Buffer[] = []
 +  let offset = 0
 +  for (const [name, content] of entries) {
-+    const bytes = Buffer.from(content)
++    const bytes = typeof content === "string" ? Buffer.from(content) : Buffer.from(content)
 +    const local = Buffer.alloc(30 + name.length)
 +    local.writeUInt32LE(0x04034b50)
 +    local.writeUInt32LE(crc32(bytes), 14)
@@ -782,6 +804,116 @@ index 0000000..ac77ad6
 +  return Buffer.concat([...files, ...directory, end])
 +}
 +const hash = (data: Uint8Array) => createHash("sha256").update(data).digest("hex")
++
++test.skipIf(process.platform !== "win32")(
++  "auto policy downloads only approved bytes, cancels safely and reports installed for the next opening",
++  async () => {
++    const root = await fs.mkdtemp(path.join(os.tmpdir(), "solucode-auto-flow-"))
++    const local = path.join(root, "local")
++    const executable = path.join(local, "solucode", "solucode.exe")
++    const candidate = path.join(root, "candidate.exe")
++    const script = path.join(root, "version.ts")
++    const managed = path.join(root, "managed.jsonc")
++    const config = path.join(root, "config")
++    await fs.mkdir(path.dirname(executable), { recursive: true })
++    await fs.mkdir(config)
++    for (const [version, outfile] of [
++      ["2.4.2-solucode.2", executable],
++      [approved.version, candidate],
++    ]) {
++      await fs.writeFile(script, `console.log("solucode v${version} (basado en OpenCode 2.4.2)")`)
++      const build = await Bun.build({
++        entrypoints: [script],
++        target: "bun",
++        compile: { outfile, autoloadBunfig: false },
++      })
++      expect(build.success).toBe(true)
++    }
++    const previous = hash(await fs.readFile(executable))
++    const bytes = zip([
++      ["solucode.exe", await fs.readFile(candidate)],
++      ["LICENSE", "MIT"],
++      ["NOTICE", "OpenCode"],
++    ])
++    await fs.writeFile(path.join(config, "opencode.jsonc"), '{"update":"auto"}')
++    await fs.writeFile(managed, '{"update":"disable"}')
++    let mode = "bad"
++    const started = Promise.withResolvers<void>()
++    const release = Promise.withResolvers<void>()
++    const requests: string[] = []
++    const server = Bun.serve({
++      port: 0,
++      async fetch(request) {
++        if (new URL(request.url).pathname === "/manifest")
++          return Response.json({ ...approved, sha256: mode === "bad" ? "0".repeat(64) : hash(bytes) })
++        if (mode === "hold") {
++          started.resolve()
++          await release.promise
++        }
++        return new Response(bytes)
++      },
++    })
++    const layers = LayerNode.compile(LayerNode.group([Global.node, EffectFlock.node]), {
++      replacements: [Global.node.replace(Global.layerWith({ config, state: path.join(root, "state") }))],
++    })
++    try {
++      await Effect.runPromise(
++        withEnv({ OPENCODE_DISABLE_AUTOUPDATE: "0" }, () =>
++          Effect.gen(function* () {
++            const updater = yield* SolucodeUpdater.create({
++              executable,
++              version: "2.4.2-solucode.2",
++              local: false,
++              localAppData: local,
++              managedConfig: managed,
++              request: (url, options) => {
++                requests.push(url)
++                expect([SolucodeUpdater.manifestURL, approved.url]).toContain(url)
++                return fetch(new URL(url === SolucodeUpdater.manifestURL ? "/manifest" : "/zip", server.url), options)
++              },
++            })
++            expect(yield* updater.run()).toBeUndefined()
++            expect(requests).toHaveLength(0)
++            yield* Effect.promise(() => fs.writeFile(managed, '{"update":"notify"}'))
++            expect(yield* updater.run()).toEqual({ type: "available", version: approved.version })
++            expect(requests).toEqual([SolucodeUpdater.manifestURL])
++            yield* Effect.promise(() => fs.writeFile(managed, '{"update":"auto"}'))
++            // A bad approved hash never replaces the installed executable.
++            expect(yield* updater.run()).toBeUndefined()
++            expect(hash(yield* Effect.promise(() => fs.readFile(executable)))).toBe(previous)
++            mode = "hold"
++            const downloading = yield* Effect.forkScoped(updater.run())
++            yield* Effect.promise(() => started.promise)
++            yield* Fiber.interrupt(downloading)
++            release.resolve()
++            expect(hash(yield* Effect.promise(() => fs.readFile(executable)))).toBe(previous)
++            expect(
++              (yield* Effect.promise(() => fs.readdir(path.dirname(executable)))).some((name) =>
++                name.startsWith(".solucode-update-"),
++              ),
++            ).toBe(false)
++            mode = "good"
++            const installing: string[] = []
++            expect(yield* updater.run((version) => installing.push(version))).toEqual({
++              type: "installed",
++              version: approved.version,
++            })
++            expect(installing).toEqual([approved.version])
++            expect(yield* updater.check()).toEqual({ type: "installed", version: approved.version })
++            expect(yield* Effect.promise(() => SolucodeUpdater.binaryVersion(executable))).toBe(approved.version)
++            const downloads = requests.filter((url) => url === approved.url).length
++            expect(yield* updater.run()).toEqual({ type: "installed", version: approved.version })
++            expect(requests.filter((url) => url === approved.url)).toHaveLength(downloads)
++          }),
++        ).pipe(Effect.provide(layers), Effect.provide(NodeServices.layer), Effect.scoped),
++      )
++    } finally {
++      release.resolve()
++      await server.stop(true)
++      await fs.rm(root, { recursive: true, force: true })
++    }
++  },
++)
 +
 +test("verifies SHA256 before reading the ZIP and rejects corrupt or unexpected contents", () => {
 +  const bytes = zip()
@@ -959,3 +1091,244 @@ index 0000000..ac77ad6
 +    }
 +  },
 +)
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 9571b8d..4d67be0 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -1103,7 +1103,7 @@ function App() {
+         ? [
+             {
+               name: "opencode.update",
+-              title: "Update OpenCode",
++              title: "Actualizar SOLUCODE",
+               slash: { name: "update" },
+               run: () => updater.open?.("manual"),
+               category: "System",
+diff --git a/packages/tui/src/component/dialog-update.tsx b/packages/tui/src/component/dialog-update.tsx
+index bd4a56c..fffd401 100644
+--- a/packages/tui/src/component/dialog-update.tsx
++++ b/packages/tui/src/component/dialog-update.tsx
+@@ -45,13 +45,13 @@ export function DialogUpdate(props: {
+     if (type === "installing") return []
+     const confirm =
+       type === "available"
+-        ? { label: "Update", run: props.install }
++        ? { label: "Actualizar", run: props.install }
+         : type === "installed"
+-          ? { label: "Restart", run: props.restart }
++          ? { label: "Cerrar SOLUCODE", run: props.restart }
+           : undefined
+     return [
+       {
+-        label: "Skip",
++        label: "Más tarde",
+         run: () => {
+           props.skip()
+           dialog.clear()
+@@ -71,11 +71,11 @@ export function DialogUpdate(props: {
+   Keymap.createLayer(() => ({
+     mode: "modal",
+     commands: [
+-      { bind: "return", title: "Confirm update action", group: "Dialog", run: () => void buttons()[active()]?.run() },
+-      { bind: "left", title: "Previous update action", group: "Dialog", run: () => move(-1) },
+-      { bind: "shift+tab", title: "Previous update action", group: "Dialog", run: () => move(-1) },
+-      { bind: "right", title: "Next update action", group: "Dialog", run: () => move(1) },
+-      { bind: "tab", title: "Next update action", group: "Dialog", run: () => move(1) },
++      { bind: "return", title: "Confirmar actualización", group: "Dialog", run: () => void buttons()[active()]?.run() },
++      { bind: "left", title: "Acción anterior", group: "Dialog", run: () => move(-1) },
++      { bind: "shift+tab", title: "Acción anterior", group: "Dialog", run: () => move(-1) },
++      { bind: "right", title: "Acción siguiente", group: "Dialog", run: () => move(1) },
++      { bind: "tab", title: "Acción siguiente", group: "Dialog", run: () => move(1) },
+     ],
+   }))
+ 
+@@ -85,10 +85,10 @@ export function DialogUpdate(props: {
+         <DialogHeader
+           title={
+             state().type === "installing"
+-              ? "Updating OpenCode"
++              ? "Actualizando SOLUCODE"
+               : state().type === "available" || state().type === "failed"
+-                ? "Update available"
+-                : "Update"
++                ? "Actualización disponible"
++                : "Actualización"
+           }
+         />
+       }
+@@ -106,25 +106,26 @@ export function DialogUpdate(props: {
+         {(current) => (
+           <Switch>
+             <Match when={current.type === "checking"}>
+-              <Spinner shimmer={theme.text.base}>Checking for updates…</Spinner>
++              <Spinner shimmer={theme.text.base}>Buscando actualizaciones…</Spinner>
+             </Match>
+             <Match when={current.type === "available"}>
+               <text fg={theme.text.muted}>
+-                An update is available. After installing, you'll be prompted to restart OpenCode.
++                Hay una versión aprobada disponible. Tras instalarla, se usará al cerrar y volver a abrir SOLUCODE.
+               </text>
+             </Match>
+             <Match when={current.type === "installing"}>
+               <Spinner shimmer={theme.text.base}>
+-                {current.type === "installing" ? `Installing OpenCode ${current.version}…` : ""}
++                {current.type === "installing" ? `Instalando SOLUCODE ${current.version}…` : ""}
+               </Spinner>
+             </Match>
+             <Match when={current.type === "installed"}>
+               <text fg={theme.text.muted} wrapMode="word">
+-                Update successful! Restart closes OpenCode, then run opencode to use the new version.
++                Actualización instalada. Puedes seguir trabajando; cierra SOLUCODE y ejecuta solucode de nuevo para
++                usarla.
+               </text>
+             </Match>
+             <Match when={current.type === "current"}>
+-              <text fg={theme.text.muted}>OpenCode is already up to date.</text>
++              <text fg={theme.text.muted}>SOLUCODE ya está al día.</text>
+             </Match>
+             <Match when={current.type === "unavailable"}>
+               <text fg={theme.text.muted} wrapMode="word">
+diff --git a/packages/tui/src/routes/home.tsx b/packages/tui/src/routes/home.tsx
+index 71e7b64..90e1a94 100644
+--- a/packages/tui/src/routes/home.tsx
++++ b/packages/tui/src/routes/home.tsx
+@@ -162,10 +162,10 @@ function UpdateNotification(props: { width: number }) {
+                   </span>
+                 </Show>
+                 {remote
+-                  ? "remote server update available"
++                  ? "actualización disponible en el servidor remoto"
+                   : state.type === "installed"
+-                    ? ` restart to use v${state.version}`
+-                    : ` to install v${state.version}`}
++                    ? ` cierra y vuelve a abrir para usar v${state.version}`
++                    : ` para instalar v${state.version}`}
+               </FadeInText>
+             </box>
+           </Show>
+diff --git a/packages/tui/src/util/presentation.ts b/packages/tui/src/util/presentation.ts
+index 2fc3e55..3c3a52d 100644
+--- a/packages/tui/src/util/presentation.ts
++++ b/packages/tui/src/util/presentation.ts
+@@ -34,7 +34,10 @@ export function epilogue(input: { readonly session?: SessionEpilogue; readonly u
+     `  ${dim}basado en OpenCode${reset}`,
+     "",
+     ...(input.updatedVersion
+-      ? [`  ${dim}Run ${reset}${bold}solucode${reset}${dim} to use ${reset}${bold}${input.updatedVersion}${reset}`, ""]
++      ? [
++          `  ${dim}Ejecuta ${reset}${bold}solucode${reset}${dim} para usar ${reset}${bold}${input.updatedVersion}${reset}`,
++          "",
++        ]
+       : []),
+     ...(input.session
+       ? [row("Session", input.session.title), row("Continue", `solucode -s ${input.session.sessionID}`), ""]
+diff --git a/packages/tui/test/component/dialog-update.test.tsx b/packages/tui/test/component/dialog-update.test.tsx
+index 60604b1..123f787 100644
+--- a/packages/tui/test/component/dialog-update.test.tsx
++++ b/packages/tui/test/component/dialog-update.test.tsx
+@@ -44,17 +44,17 @@ test("installation progress replaces checking while the update job is still pend
+ 
+   try {
+     app.renderer.start()
+-    await app.waitForFrame((frame) => frame.includes("Checking for updates"))
++    await app.waitForFrame((frame) => frame.includes("Buscando actualizaciones"))
+     setState({ type: "installing", version: "2.0.0" })
+     await app.waitForFrame(
+       (frame) =>
+-        frame.includes("Updating OpenCode") &&
+-        frame.includes("Installing OpenCode 2.0.0") &&
+-        !frame.includes("Checking"),
++        frame.includes("Actualizando SOLUCODE") &&
++        frame.includes("Instalando SOLUCODE 2.0.0") &&
++        !frame.includes("Buscando"),
+     )
+-    expect(app.captureCharFrame()).not.toContain("Skip")
++    expect(app.captureCharFrame()).not.toContain("Más tarde")
+     pending.reject(new Error("Update service unavailable"))
+-    await app.waitForFrame((frame) => frame.includes("Update service unavailable") && !frame.includes("Installing"))
++    await app.waitForFrame((frame) => frame.includes("Update service unavailable") && !frame.includes("Instalando"))
+   } finally {
+     pending.resolve(undefined)
+     app.renderer.destroy()
+@@ -91,9 +91,9 @@ test.each([false, true])("update choices are keyboard-navigable buttons with new
+ 
+   try {
+     app.renderer.start()
+-    await app.waitForFrame((frame) => frame.includes("Update available") && frame.includes("Skip"))
++    await app.waitForFrame((frame) => frame.includes("Actualización disponible") && frame.includes("Más tarde"))
+     const frame = app.captureCharFrame()
+-    expect(frame).toMatch(/Skip\s+Update/)
++    expect(frame).toMatch(/Más tarde\s+Actualizar/)
+     expect(frame).not.toContain("enter")
+ 
+     app.mockInput.pressArrow("left")
+@@ -109,3 +109,46 @@ function ModalUpdate(props: Parameters<typeof DialogUpdate>[0]) {
+   onCleanup(Keymap.use().mode.push("modal"))
+   return <DialogUpdate {...props} />
+ }
++
++test.each([44, 80])(
++  "an installed update explains reopening SOLUCODE and closes only on confirmation at width %p",
++  async (width) => {
++    await using temporary = await tmpdir()
++    let closed = 0
++    const app = await testRender(
++      () => (
++        <TestTuiContexts directory={temporary.path} paths={{ state: temporary.path }}>
++          <ConfigProvider config={createTuiResolvedConfig()}>
++            <ThemeProvider mode="dark" source={emptyThemeSource}>
++              <Keymap.Provider>
++                <ToastProvider>
++                  <DialogProvider>
++                    <ModalUpdate
++                      state={() => ({ type: "installed", version: "2.4.2-solucode.3" })}
++                      skip={() => {}}
++                      install={async () => {}}
++                      restart={() => {
++                        closed++
++                      }}
++                    />
++                  </DialogProvider>
++                </ToastProvider>
++              </Keymap.Provider>
++            </ThemeProvider>
++          </ConfigProvider>
++        </TestTuiContexts>
++      ),
++      { width, height: 24, kittyKeyboard: true },
++    )
++    try {
++      app.renderer.start()
++      await app.waitForFrame((frame) => frame.includes("Cerrar SOLUCODE"))
++      expect(app.captureCharFrame().replace(/\s+/g, " ")).toContain("ejecuta solucode de nuevo")
++      expect(closed).toBe(0)
++      app.mockInput.pressEnter()
++      await app.waitFor(() => closed === 1)
++    } finally {
++      app.renderer.destroy()
++    }
++  },
++)
+diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/util/presentation.test.ts
+index 474e86e..d8eaac0 100644
+--- a/packages/tui/test/util/presentation.test.ts
++++ b/packages/tui/test/util/presentation.test.ts
+@@ -19,13 +19,16 @@ test("formats session continuation summary", () => {
+ })
+ 
+ test("tells the user to start SOLUCODE again after an update", () => {
+-  expect(rows(epilogue({ updatedVersion: "2.0.0" }))).toEqual(["  basado en OpenCode", "  Run solucode to use 2.0.0"])
++  expect(rows(epilogue({ updatedVersion: "2.0.0" }))).toEqual([
++    "  basado en OpenCode",
++    "  Ejecuta solucode para usar 2.0.0",
++  ])
+ })
+ 
+ test("keeps the session continuation after an update", () => {
+   expect(rows(epilogue({ session: { title: "A session", sessionID: "ses_123" }, updatedVersion: "2.0.0" }))).toEqual([
+     "  basado en OpenCode",
+-    "  Run solucode to use 2.0.0",
++    "  Ejecuta solucode para usar 2.0.0",
+     "  Session   A session",
+     "  Continue  solucode -s ses_123",
+   ])
