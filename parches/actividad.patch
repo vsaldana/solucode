@@ -1,0 +1,1148 @@
+diff --git a/packages/tui/src/component/prompt/activity.tsx b/packages/tui/src/component/prompt/activity.tsx
+new file mode 100644
+index 0000000..fedb9cc
+--- /dev/null
++++ b/packages/tui/src/component/prompt/activity.tsx
+@@ -0,0 +1,49 @@
++import { createMemo, createSignal } from "solid-js"
++import { useData } from "../../context/data"
++import { useEvent } from "../../context/event"
++import { useTheme } from "../../context/theme"
++import { currentActivity } from "../../util/activity"
++import { createExecutionElapsed, executionStart } from "../../util/execution-progress"
++
++export function usePromptActivity(props: { sessionID?: string; visible?: boolean }) {
++  const data = useData()
++  const event = useEvent()
++  const [observed, setObserved] = createSignal<{ sessionID: string; started: number }>()
++  event.on("session.execution.started", (event) => {
++    if (event.data.sessionID === props.sessionID)
++      setObserved({ sessionID: event.data.sessionID, started: event.created })
++  })
++  const started = createMemo(() =>
++    executionStart(
++      data.session.get(props.sessionID ?? "")?.time,
++      observed()?.sessionID === props.sessionID ? observed()?.started : undefined,
++    ),
++  )
++  const active = () => props.visible !== false && data.session.status(props.sessionID ?? "") === "running"
++  const elapsed = createExecutionElapsed(() => ({ started: started(), active: active() }))
++  // Deliberately independent of the one-second clock: do not scan history on every tick.
++  const activity = createMemo(() =>
++    active()
++      ? currentActivity(
++          data.session.message.list(props.sessionID ?? ""),
++          started(),
++          (data.session.permission.list(props.sessionID ?? "")?.length ?? 0) > 0,
++        )
++      : "",
++  )
++  return { elapsed, activity }
++}
++
++export function PromptActivity(props: { elapsed: string; activity: string }) {
++  const theme = useTheme()
++  return (
++    <box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} minWidth={props.elapsed.length}>
++      <text fg={theme.text.base} flexShrink={0}>
++        {props.elapsed}
++      </text>
++      <text fg={theme.text.muted} flexGrow={1} flexShrink={1} minWidth={0} wrapMode="none" truncate>
++        {props.activity}
++      </text>
++    </box>
++  )
++}
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index 2a59378..c0b6e91 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -73,6 +73,7 @@ import { truncateFilePath } from "../../ui/file-path"
+ import { PromptMetadataRow } from "./metadata"
+ import { limitLabel, useUsageLimits } from "../usage"
+ import { createSuggestion, suggestionTurn } from "../../prompt/suggestion"
++import { PromptActivity, usePromptActivity } from "./activity"
+ 
+ export type PromptProps = {
+   sessionID?: string
+@@ -138,11 +139,8 @@ export function PromptInterruptStatus(props: {
+   })
+ 
+   return (
+-    <text fg={props.armed ? armedColor() : props.text} wrapMode="none" truncate flexShrink={1}>
+-      esc{" "}
+-      <span style={{ fg: props.armed ? armedColor() : props.subdued }}>
+-        {props.armed ? "again to interrupt" : "interrupt"}
+-      </span>
++    <text fg={props.armed ? armedColor() : props.text} wrapMode="none" truncate flexShrink={0}>
++      esc <span style={{ fg: props.armed ? armedColor() : props.subdued }}>{props.armed ? "otra vez" : "detener"}</span>
+     </text>
+   )
+ }
+@@ -213,6 +211,7 @@ export function Prompt(props: PromptProps) {
+   const dialog = useDialog()
+   const toast = useToast()
+   const status = createMemo(() => data.session.status(props.sessionID ?? ""))
++  const progress = usePromptActivity(props)
+   const stash = usePromptStash()
+   const keymap = Keymap.use()
+   const renderer = useRenderer()
+@@ -1704,7 +1703,7 @@ export function Prompt(props: PromptProps) {
+   const footerInput = () => ({
+     sessionID: props.sessionID,
+     mode: store.mode,
+-    showDetails: store.interrupt === 0 || dimensions().width >= 80,
++    showDetails: status() === "running" ? dimensions().width >= 100 : store.interrupt === 0 || dimensions().width >= 80,
+   })
+ 
+   const placeholderText = createMemo(() => {
+@@ -2009,7 +2008,7 @@ export function Prompt(props: PromptProps) {
+               <box
+                 flexGrow={1}
+                 flexShrink={1}
+-                minWidth={0}
++                minWidth={status() === "running" ? Math.min(24, dimensions().width - 6) : 0}
+                 onSizeChange={function (this: BoxRenderable) {
+                   const width = this.width
+                   queueMicrotask(() => setLocationWidth(width))
+@@ -2017,12 +2016,20 @@ export function Prompt(props: PromptProps) {
+               >
+                 <Switch>
+                   <Match when={status() === "running"}>
+-                    <box flexDirection="row" gap={1} flexGrow={1} justifyContent="flex-start">
+-                      <box marginLeft={1}>
++                    <box
++                      flexDirection="row"
++                      gap={1}
++                      flexGrow={1}
++                      flexShrink={1}
++                      minWidth={0}
++                      justifyContent="flex-start"
++                    >
++                      <box marginLeft={1} flexShrink={0}>
+                         <Show when={config.animations ?? true} fallback={<text fg={theme.text.muted}>[⋯]</text>}>
+                           <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
+                         </Show>
+                       </box>
++                      <PromptActivity elapsed={progress.elapsed()} activity={progress.activity()} />
+                       <PromptInterruptStatus
+                         armed={store.interrupt > 0}
+                         animations={animationsEnabled()}
+diff --git a/packages/tui/src/routes/session/activity-preview.tsx b/packages/tui/src/routes/session/activity-preview.tsx
+new file mode 100644
+index 0000000..cd8a530
+--- /dev/null
++++ b/packages/tui/src/routes/session/activity-preview.tsx
+@@ -0,0 +1,102 @@
++import type { SessionMessageAssistantTool } from "@opencode/client"
++import { createMemo, Show } from "solid-js"
++import stripAnsi from "strip-ansi"
++import { useTheme } from "../../context/theme"
++import { parseApplyPatchFiles, parseScriptChanges } from "../../util/tool-changes"
++import { canonicalToolName, toolDisplayMetadata } from "../../util/tool-display"
++import { collapseToolOutput } from "../../util/collapse-tool-output"
++import { use } from "./render-context"
++
++const mutations = new Set(["edit", "write", "patch"])
++
++export function hasReportedChanges(part: SessionMessageAssistantTool) {
++  if (part.state.status === "streaming") return false
++  if (part.state.status === "completed" && mutations.has(canonicalToolName(part.name))) return true
++  return (
++    parseScriptChanges(part.state.metadata?.files).length > 0 ||
++    parseApplyPatchFiles(part.state.metadata?.files).length > 0
++  )
++}
++
++export function toolPreview(part: SessionMessageAssistantTool, draftOnly = false) {
++  const name = canonicalToolName(part.name)
++  if (part.state.status === "streaming")
++    return part.state.input
++      ? { title: "Argumentos parciales · sin ejecutar", text: part.state.input, tail: true }
++      : undefined
++  const metadata = toolDisplayMetadata(part.state)
++  const files = name === "execute" ? parseScriptChanges(metadata.files) : parseApplyPatchFiles(metadata.files)
++  if (files.length > 0) {
++    if (draftOnly) return
++    return {
++      title: `Cambios reportados · ${files.length} ${files.length === 1 ? "archivo" : "archivos"}`,
++      text: files
++        .slice(-2)
++        .map((file) => `${file.relativePath}\n${file.patch || "(sin vista de texto)"}`)
++        .join("\n"),
++    }
++  }
++  const input = part.state.input
++  const target = typeof input.path === "string" ? ` · ${input.path}` : ""
++  if (name === "write" && typeof input.content === "string") {
++    if (draftOnly && part.state.status !== "running") return
++    return {
++      title: `${part.state.status === "completed" ? "Contenido escrito" : "Cambio en curso · sin confirmar"}${target}`,
++      text: input.content,
++    }
++  }
++  if (part.state.status !== "running") return
++  if (name === "edit") {
++    const before = typeof input.oldString === "string" ? input.oldString : ""
++    const after = typeof input.newString === "string" ? input.newString : ""
++    return before || after
++      ? {
++          title: `Cambio en curso · sin confirmar${target}`,
++          text: [
++            collapseToolOutput(before, 3, 600)
++              .output.split("\n")
++              .map((line) => `- ${line}`)
++              .join("\n"),
++            collapseToolOutput(after, 3, 600)
++              .output.split("\n")
++              .map((line) => `+ ${line}`)
++              .join("\n"),
++          ].join("\n"),
++        }
++      : undefined
++  }
++  if (name === "patch" && typeof input.patchText === "string")
++    return { title: "Parche en curso · sin confirmar", text: input.patchText }
++  if (draftOnly) return
++  const output = typeof metadata.output === "string" ? metadata.output : ""
++  return output ? { title: "Salida parcial", text: output, tail: true } : undefined
++}
++
++export function ToolActivityPreview(props: { part: SessionMessageAssistantTool; draftOnly?: boolean }) {
++  const ctx = use()
++  const theme = useTheme()
++  const preview = createMemo(() => toolPreview(props.part, props.draftOnly))
++  const text = createMemo(() => {
++    const value = preview()
++    if (!value) return ""
++    const limit = 6 * Math.max(1, ctx.width - 5)
++    const clean = stripAnsi(value.text)
++    // Streamed arguments/output show their newest data; confirmed diffs start with the file and hunk.
++    const source = value.tail && clean.length > limit ? `…${clean.slice(-limit + 1)}` : clean
++    return collapseToolOutput(source, 6, limit).output
++  })
++  return (
++    <Show when={preview()}>
++      {(value) => (
++        <box paddingLeft={3} flexShrink={0}>
++          <text fg={theme.text.muted} wrapMode="word" maxHeight={2}>
++            {value().title}
++          </text>
++          <text fg={theme.text.base} wrapMode="char" maxHeight={6}>
++            {text()}
++          </text>
++        </box>
++      )}
++    </Show>
++  )
++}
+diff --git a/packages/tui/src/routes/session/activity-summary.ts b/packages/tui/src/routes/session/activity-summary.ts
+index 6578f50..2a6501e 100644
+--- a/packages/tui/src/routes/session/activity-summary.ts
++++ b/packages/tui/src/routes/session/activity-summary.ts
+@@ -5,6 +5,7 @@ import type {
+   SessionMessageInfo,
+ } from "@opencode/client"
+ import { canonicalToolName, executeCalls } from "../../util/tool-display"
++import { toolActivity } from "../../util/activity"
+ import { visitEntries } from "./anchor-view"
+ import { instructionPaths, type PartRef, type SessionEntry, type SessionNode } from "./grouping/session"
+ import { reasoningContent } from "./message-parts"
+@@ -39,16 +40,16 @@ export function summarizeActivity(
+     entries.flatMap((entry) => (entry.type === "message" ? instructionPaths(message(entry.messageID)) : [])),
+   )
+   const summary = activitySummary(items, files.size, closed)
+-  const current = items.find((item) => isActive(item, closed))
+-  return { ...summary, label: summary.label || (current ? busyLabel(current.part) : "") }
++  const current =
++    items.findLast((item) => item.part.type === "tool" && isActive(item, closed)) ??
++    items.findLast((item) => isActive(item, closed))
++  return { ...summary, label: [current ? busyLabel(current.part) : "", summary.label].filter(Boolean).join(" · ") }
+ }
+ 
+ /** Status for a running item, independent of its details, so it doesn't flicker as they arrive. */
+ export function busyLabel(part: Item["part"]) {
+-  if (part.type === "reasoning") return "Thinking…"
+-  const name = canonicalToolName(part.name)
+-  const noun = name === "shell" ? "command" : name === "execute" ? "code" : name
+-  return `${part.state.status === "streaming" ? "Preparing" : "Running"} ${noun}…`
++  if (part.type === "reasoning") return "Procesando respuesta"
++  return toolActivity(part)
+ }
+ 
+ /**
+diff --git a/packages/tui/src/routes/session/group-view.tsx b/packages/tui/src/routes/session/group-view.tsx
+index 0ede753..31d116b 100644
+--- a/packages/tui/src/routes/session/group-view.tsx
++++ b/packages/tui/src/routes/session/group-view.tsx
+@@ -8,11 +8,19 @@ import { SplitBorder } from "../../ui/border"
+ import { Locale } from "../../util/locale"
+ import { EntryAnchor, GroupAnchor, visitEntries } from "./anchor-view"
+ import { groupID } from "./anchors"
+-import { instructionPaths, type PartRef, type SessionEntry, type SessionGroup, type SessionNode } from "./grouping/session"
++import {
++  instructionPaths,
++  type PartRef,
++  type SessionEntry,
++  type SessionGroup,
++  type SessionNode,
++} from "./grouping/session"
+ import { summarizeActivity } from "./activity-summary"
+ import { InlineToolRow, ReasoningBody, reasoningContent, toolDisplay } from "./message-parts"
+ import { use } from "./render-context"
+ import { resolvePart } from "./rows"
++import { canonicalToolName } from "../../util/tool-display"
++import { hasReportedChanges, ToolActivityPreview } from "./activity-preview"
+ 
+ type Renderers = {
+   message: (messageID: string) => SessionMessageInfo | undefined
+@@ -204,6 +212,21 @@ function ActivityGroup(props: GroupProps) {
+   const [hover, setHover] = createSignal(false)
+   const entries = createMemo(() => descendants(props.node))
+   const summary = createMemo(() => summarizeActivity(props.node, props.message, props.pending, props.completed))
++  const tools = createMemo(() => {
++    if (props.completed || disclosure.expanded()) return []
++    return entries().flatMap((entry) => {
++      if (entry.type !== "part" || isPending(entry, props.pending)) return []
++      const message = props.message(entry.ref.messageID)
++      if (message?.type !== "assistant") return []
++      const part = resolvePart(message, entry.ref.partID)
++      return part?.type === "tool" ? [{ entry, part }] : []
++    })
++  })
++  const previews = createMemo(() => {
++    const active = tools().findLast(({ part }) => part.state.status === "streaming" || part.state.status === "running")
++    const changed = tools().findLast(({ part }) => hasReportedChanges(part))
++    return [changed, active].filter((item, index, items) => item !== undefined && items.indexOf(item) === index)
++  })
+   return (
+     <GroupAnchor groupID={disclosure.id()} active={summary().label !== ""}>
+       <Show when={summary().label}>
+@@ -225,6 +248,18 @@ function ActivityGroup(props: GroupProps) {
+           </box>
+         </Show>
+       </Show>
++      <For each={previews()}>
++        {(item) =>
++          item && (
++            <Show
++              when={canonicalToolName(item.part.name) === "shell" && item.part.state.status === "running"}
++              fallback={<ToolActivityPreview part={item.part} />}
++            >
++              <EntryAnchor entry={item.entry}>{props.entry(item.entry)}</EntryAnchor>
++            </Show>
++          )
++        }
++      </For>
+       <PendingEntries {...props} entries={entries()} />
+     </GroupAnchor>
+   )
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index b295aa5..0cac704 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -24,14 +24,7 @@ import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
+ import { Spinner, SPINNER_FRAMES } from "../../component/spinner"
+ import { PatchDiff } from "../../component/patch-diff"
+ import { useTheme, useThemes } from "../../context/theme"
+-import {
+-  BoxRenderable,
+-  ScrollBoxRenderable,
+-  addDefaultParsers,
+-  TextAttributes,
+-  RGBA,
+-  MouseEvent,
+-} from "@opentui/core"
++import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA, MouseEvent } from "@opentui/core"
+ import { Prompt, type PromptRef } from "../../component/prompt"
+ import {
+   mediaHashFromUri,
+@@ -58,6 +51,8 @@ import {
+   toolDisplayMetadata,
+   type ExecuteCall,
+ } from "../../util/tool-display"
++import { parseScriptChanges, parseApplyPatchFiles } from "../../util/tool-changes"
++import { ToolActivityPreview } from "./activity-preview"
+ import { DialogExecute } from "./dialog-execute"
+ import { RetryProvider } from "../../component/retry-provider"
+ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+@@ -1286,7 +1281,9 @@ export function Session(props: {
+       },
+       run: () => {
+         const lastAssistantMessage = messagesBeforeRevert().findLast(
+-          (msg) => msg.type === "assistant" || (msg.type === "compaction" && msg.status === "completed" && msg.summary.trim() !== ""),
++          (msg) =>
++            msg.type === "assistant" ||
++            (msg.type === "compaction" && msg.status === "completed" && msg.summary.trim() !== ""),
+         )
+         if (!lastAssistantMessage) {
+           toast.show({ message: "No assistant messages found", variant: "error" })
+@@ -1594,9 +1591,7 @@ export function Session(props: {
+                   onMouseOut={() => setLatestHovered(false)}
+                   onMouseUp={toBottom}
+                 >
+-                  <text
+-                    fg={latestHovered() ? theme.text.action.secondary.hovered : theme.text.action.secondary.base}
+-                  >
++                  <text fg={latestHovered() ? theme.text.action.secondary.hovered : theme.text.action.secondary.base}>
+                     Jump to latest ↓
+                   </text>
+                 </box>
+@@ -1642,12 +1637,7 @@ export function Session(props: {
+                     }}
+                   </Show>
+                 </Match>
+-                <Match
+-                  when={
+-                    session() &&
+-                    currentLocation.error?.location.directory === session()!.location.directory
+-                  }
+-                >
++                <Match when={session() && currentLocation.error?.location.directory === session()!.location.directory}>
+                   <SessionLocationMissing
+                     directory={session()!.location.directory}
+                     projectID={session()!.projectID}
+@@ -2661,6 +2651,9 @@ function ToolPart(props: { part: SessionMessageAssistantTool; images?: boolean }
+     </Switch>
+   )
+   return [
++    <Show when={props.part.state.status === "streaming" || props.part.state.status === "running"}>
++      <ToolActivityPreview part={props.part} draftOnly />
++    </Show>,
+     content,
+     <Show when={props.images !== false}>
+       <ToolImages parts={[props.part]} />
+@@ -2951,9 +2944,7 @@ function BlockTool(props: BlockToolProps) {
+               <Show
+                 when={props.spinner}
+                 fallback={
+-                  <text
+-                    fg={permission() ? theme.text.feedback.warning.base : (props.headerColor ?? theme.text.muted)}
+-                  >
++                  <text fg={permission() ? theme.text.feedback.warning.base : (props.headerColor ?? theme.text.muted)}>
+                     {title()}
+                   </text>
+                 }
+@@ -3153,11 +3144,7 @@ function ShellDisplay(props: {
+           <Show
+             when={isRunning()}
+             fallback={
+-              <text
+-                fg={theme.text.base}
+-                wrapMode={expanded() ? "word" : "char"}
+-                maxHeight={expanded() ? undefined : 2}
+-              >
++              <text fg={theme.text.base} wrapMode={expanded() ? "word" : "char"} maxHeight={expanded() ? undefined : 2}>
+                 {limitedInput()}
+               </text>
+             }
+@@ -3258,15 +3245,15 @@ function Read(props: ToolProps) {
+         Read {pathFormatter.format(stringValue(props.input.path))}
+         <Show when={props.input.offset !== undefined || props.input.limit !== undefined}>
+           :{finiteNumber(props.input.offset) || 1}-
+-          {props.input.limit ? (finiteNumber(props.input.offset) || 1) + (finiteNumber(props.input.limit) || 0) - 1 : ""}
++          {props.input.limit
++            ? (finiteNumber(props.input.offset) || 1) + (finiteNumber(props.input.limit) || 0) - 1
++            : ""}
+         </Show>
+       </InlineTool>
+       <For each={loaded()}>
+         {(filepath) => (
+           <box paddingLeft={3}>
+-            <text fg={theme.text.muted}>
+-              ↳ Loaded {pathFormatter.format(filepath)}
+-            </text>
++            <text fg={theme.text.muted}>↳ Loaded {pathFormatter.format(filepath)}</text>
+           </box>
+         )}
+       </For>
+@@ -3838,57 +3825,7 @@ export function changeCounts(file: { additions?: number; deletions?: number }) {
+   }
+ }
+ 
+-// A script's changes, like a patch's files, but a change may have no patch and, where nothing could be derived
+-// without reading the file, no counts.
+-export function parseScriptChanges(value: unknown) {
+-  if (!Array.isArray(value)) return []
+-  return value.flatMap((item) => {
+-    const file = recordValue(item)
+-    const status = stringValue(file?.status)
+-    const type =
+-      status === "added" ? "add" : status === "deleted" ? "delete" : status === "modified" ? "update" : undefined
+-    const relativePath = stringValue(file?.file)
+-    if (!file || !type || !relativePath) return []
+-    return [
+-      {
+-        type,
+-        relativePath,
+-        filePath: relativePath,
+-        patch: stringValue(file.patch) ?? "",
+-        additions: finiteNumber(file.additions),
+-        deletions: finiteNumber(file.deletions),
+-        movePath: undefined as string | undefined,
+-      },
+-    ]
+-  })
+-}
+-
+-export function parseApplyPatchFiles(value: unknown) {
+-  if (!Array.isArray(value)) return []
+-  return value.flatMap((item) => {
+-    const file = recordValue(item)
+-    if (!file) return []
+-    const status = stringValue(file.status)
+-    const type =
+-      stringValue(file.type) ??
+-      (status === "added" ? "add" : status === "deleted" ? "delete" : status === "modified" ? "update" : undefined)
+-    const relativePath = stringValue(file.file) ?? stringValue(file.relativePath)
+-    const filePath = stringValue(file.filePath) ?? relativePath
+-    const patch = stringValue(file.patch)
+-    const additions = finiteNumber(file.additions)
+-    const deletions = finiteNumber(file.deletions)
+-    if (
+-      !type ||
+-      !relativePath ||
+-      !filePath ||
+-      patch === undefined ||
+-      additions === undefined ||
+-      deletions === undefined
+-    )
+-      return []
+-    return [{ type, relativePath, filePath, patch, additions, deletions, movePath: stringValue(file.movePath) }]
+-  })
+-}
++export { parseScriptChanges, parseApplyPatchFiles } from "../../util/tool-changes"
+ 
+ export function parseQuestions(value: unknown) {
+   if (!Array.isArray(value)) return []
+diff --git a/packages/tui/src/util/activity.ts b/packages/tui/src/util/activity.ts
+new file mode 100644
+index 0000000..1bbdbc8
+--- /dev/null
++++ b/packages/tui/src/util/activity.ts
+@@ -0,0 +1,54 @@
++import type { SessionMessageAssistantTool, SessionMessageInfo } from "@opencode/client"
++import { canonicalToolName, executeCalls } from "./tool-display"
++
++const names: Record<string, string> = {
++  shell: "comando",
++  execute: "código",
++  read: "lectura",
++  edit: "edición",
++  write: "escritura",
++  patch: "parche",
++  glob: "búsqueda de archivos",
++  grep: "búsqueda",
++  websearch: "búsqueda web",
++  webfetch: "consulta web",
++  subagent: "subagente",
++  todowrite: "lista de tareas",
++  skill: "instrucciones",
++}
++
++export function toolActivity(part: SessionMessageAssistantTool) {
++  const name = canonicalToolName(part.name)
++  if (name === "question" && part.state.status === "running") return "Esperando tu respuesta"
++  const call =
++    part.state.status === "running"
++      ? executeCalls(part.state.metadata?.toolCalls).findLast((item) => item.status === "running")
++      : undefined
++  const input = call?.input ?? (typeof part.state.input === "string" ? {} : part.state.input)
++  const target = [input.path, input.filePath, input.command, input.query, input.pattern].find(
++    (value): value is string => typeof value === "string" && value !== "",
++  )
++  const tool = call ? canonicalToolName(call.tool) : name
++  return `${part.state.status === "streaming" ? "Preparando" : "Ejecutando"} ${names[tool] ?? tool}${target ? ` · ${target.replace(/\s+/g, " ").slice(0, 160)}` : ""}`
++}
++
++/** Observed activity only. Reasoning contents never enter this label. */
++export function currentActivity(messages: readonly SessionMessageInfo[], started?: number, permission = false) {
++  if (permission) return "Esperando permiso"
++  for (let index = messages.length - 1; index >= 0; index--) {
++    const message = messages[index]
++    if (message.type === "idle" || (started !== undefined && message.time.created < started)) break
++    if (message.type === "compaction" && message.status === "running") return "Resumiendo contexto"
++    if (message.type !== "assistant") continue
++    if (message.retry) return `Esperando reintento · intento ${message.retry.attempt}`
++    const tool = message.content.findLast(
++      (part) => part.type === "tool" && (part.state.status === "streaming" || part.state.status === "running"),
++    )
++    if (tool?.type === "tool") return toolActivity(tool)
++    if (message.time.completed !== undefined) continue
++    if (message.content.some((part) => part.type === "text" && part.text)) return "Recibiendo respuesta"
++    if (message.time.firstToken !== undefined) return "Procesando respuesta"
++    return "Esperando respuesta"
++  }
++  return "Esperando respuesta"
++}
+diff --git a/packages/tui/src/util/execution-progress.ts b/packages/tui/src/util/execution-progress.ts
+new file mode 100644
+index 0000000..54eb585
+--- /dev/null
++++ b/packages/tui/src/util/execution-progress.ts
+@@ -0,0 +1,33 @@
++import { createEffect, createMemo, createSignal, onCleanup, type Accessor } from "solid-js"
++
++export function executionStart(time: { busy?: number; idle?: number } | undefined, observed?: number) {
++  const busy = time?.busy
++  const stored = busy !== undefined && busy > (time?.idle ?? -Infinity) ? busy : undefined
++  return observed === undefined ? stored : Math.max(observed, stored ?? -Infinity)
++}
++
++export function elapsedTime(started: number | undefined, now: number) {
++  if (started === undefined) return "--:--"
++  const seconds = Math.max(0, Math.floor((now - started) / 1_000))
++  const minutes = Math.floor(seconds / 60)
++  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`
++}
++
++const clock = {
++  now: () => Date.now(),
++  every(tick: () => void) {
++    const timer = setInterval(tick, 1_000)
++    return () => clearInterval(timer)
++  },
++}
++
++/** The execution timestamp owns elapsed time; tool changes and renders never reset it. */
++export function createExecutionElapsed(input: Accessor<{ started?: number; active: boolean }>, time = clock) {
++  const [now, setNow] = createSignal(time.now())
++  createEffect(() => {
++    if (!input().active || input().started === undefined) return
++    setNow(time.now())
++    onCleanup(time.every(() => setNow(time.now())))
++  })
++  return createMemo(() => elapsedTime(input().started, now()))
++}
+diff --git a/packages/tui/src/util/tool-changes.ts b/packages/tui/src/util/tool-changes.ts
+new file mode 100644
+index 0000000..607ff33
+--- /dev/null
++++ b/packages/tui/src/util/tool-changes.ts
+@@ -0,0 +1,62 @@
++import { finiteNumber } from "./tool-display"
++import { isRecord } from "./record"
++
++// A script's changes, like a patch's files, but a change may have no patch and, where nothing could be derived
++// without reading the file, no counts.
++export function parseScriptChanges(value: unknown) {
++  if (!Array.isArray(value)) return []
++  return value.flatMap((item) => {
++    const file = recordValue(item)
++    const status = stringValue(file?.status)
++    const type =
++      status === "added" ? "add" : status === "deleted" ? "delete" : status === "modified" ? "update" : undefined
++    const relativePath = stringValue(file?.file)
++    if (!file || !type || !relativePath) return []
++    return [
++      {
++        type,
++        relativePath,
++        filePath: relativePath,
++        patch: stringValue(file.patch) ?? "",
++        additions: finiteNumber(file.additions),
++        deletions: finiteNumber(file.deletions),
++        movePath: undefined as string | undefined,
++      },
++    ]
++  })
++}
++
++export function parseApplyPatchFiles(value: unknown) {
++  if (!Array.isArray(value)) return []
++  return value.flatMap((item) => {
++    const file = recordValue(item)
++    if (!file) return []
++    const status = stringValue(file.status)
++    const type =
++      stringValue(file.type) ??
++      (status === "added" ? "add" : status === "deleted" ? "delete" : status === "modified" ? "update" : undefined)
++    const relativePath = stringValue(file.file) ?? stringValue(file.relativePath)
++    const filePath = stringValue(file.filePath) ?? relativePath
++    const patch = stringValue(file.patch)
++    const additions = finiteNumber(file.additions)
++    const deletions = finiteNumber(file.deletions)
++    if (
++      !type ||
++      !relativePath ||
++      !filePath ||
++      patch === undefined ||
++      additions === undefined ||
++      deletions === undefined
++    )
++      return []
++    return [{ type, relativePath, filePath, patch, additions, deletions, movePath: stringValue(file.movePath) }]
++  })
++}
++
++function stringValue(value: unknown) {
++  return typeof value === "string" ? value : undefined
++}
++
++function recordValue(value: unknown): Record<string, unknown> | undefined {
++  return isRecord(value) ? value : undefined
++}
+diff --git a/packages/tui/test/cli/tui/group-view.test.tsx b/packages/tui/test/cli/tui/group-view.test.tsx
+index 90eceb2..3d4a065 100644
+--- a/packages/tui/test/cli/tui/group-view.test.tsx
++++ b/packages/tui/test/cli/tui/group-view.test.tsx
+@@ -202,7 +202,7 @@ test("expanded instructions stay adjacent to their summary and each other", asyn
+   }
+ })
+ 
+-test("a low activity group with nothing finished stays collapsed behind a status", async () => {
++test("a low activity group keeps the current command visible while older work stays collapsed", async () => {
+   const config = createTuiResolvedConfig({ animations: false })
+   const shell = (id: string) => ({
+     type: "tool" as const,
+@@ -241,9 +241,9 @@ test("a low activity group with nothing finished stays collapsed behind a status
+   })
+   try {
+     app.renderer.start()
+-    await app.waitForFrame((frame) => frame.includes("Running command…"))
++    await app.waitForFrame((frame) => frame.includes("Ejecutando comando"))
+     expect(app.captureCharFrame()).not.toContain("Shell one")
+-    expect(app.captureCharFrame()).not.toContain("Shell two")
++    expect(app.captureCharFrame()).toContain("Shell two")
+   } finally {
+     app.renderer.destroy()
+   }
+@@ -300,7 +300,71 @@ test("failed low activity uses a disclosure icon and keeps details expandable",
+   }
+ })
+ 
++test.each([80, 24])("a closed low group bounds a proposed edit to six visible lines at width %s", async (width) => {
++  const [message, setMessage] = createStore<SessionMessageAssistant>({
++    id: "a",
++    type: "assistant",
++    agent: "build",
++    model: { providerID: "fixture", id: "fixture" },
++    time: { created: 1 },
++    content: [
++      {
++        type: "tool",
++        id: "write",
++        name: "write",
++        time: { created: 1 },
++        state: {
++          status: "running",
++          input: {
++            path: "a.ts",
++            content: Array.from({ length: 100 }, (_, index) => `LINE ${String(index + 1).padStart(2, "0")}`).join("\n"),
++          },
++          metadata: {},
++        },
++      },
++    ],
++  })
++  const app = await mount({
++    width,
++    row: {
++      type: "group",
++      kind: "activity",
++      size: 1,
++      completed: false,
++      pending: [],
++      children: [{ type: "entry", size: 1, entry: { type: "part", ref: { messageID: "a", partID: "write" } } }],
++    },
++    anchors: createTimelineAnchors(),
++    config: createTuiResolvedConfig({ animations: false }),
++    expanded: () => false,
++    setExpanded: () => {},
++    message: () => message,
++    entry: () => <text>Full tool</text>,
++  })
++  try {
++    await app.renderOnce()
++    expect(app.captureCharFrame()).toContain("LINE 01")
++    expect(app.captureCharFrame()).not.toContain("LINE 07")
++    expect(app.captureCharFrame()).not.toContain("Contenido escrito")
++    setMessage("content", [
++      {
++        type: "tool",
++        id: "write",
++        name: "write",
++        time: { created: 1 },
++        state: { status: "streaming", input: '{"content":"NEXT_FRAGMENT' },
++      },
++    ])
++    await app.renderOnce()
++    expect(app.captureCharFrame().replace(/\s+/g, "")).toContain("NEXT_FRAGMENT")
++    expect(app.captureCharFrame()).not.toContain("LINE 01")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
+ function mount(input: {
++  width?: number
+   row: SessionGroup
+   anchors: ReturnType<typeof createTimelineAnchors>
+   config: ReturnType<typeof createTuiResolvedConfig>
+@@ -316,8 +380,8 @@ function mount(input: {
+           <ThemeProvider mode="dark" source={emptyThemeSource}>
+             <context.Provider
+               value={{
+-                width: 40,
+-                terminal: { width: 40, height: 24 },
++                width: input.width ?? 40,
++                terminal: { width: input.width ?? 40, height: 24 },
+                 sessionID: "fixture",
+                 anchors: input.anchors,
+                 groupExpanded: input.expanded,
+@@ -347,6 +411,6 @@ function mount(input: {
+         </ConfigProvider>
+       </TestTuiContexts>
+     ),
+-    { width: 40, height: 24 },
++    { width: input.width ?? 40, height: 24 },
+   )
+ }
+diff --git a/packages/tui/test/cli/tui/prompt-interrupt-status.test.tsx b/packages/tui/test/cli/tui/prompt-interrupt-status.test.tsx
+index 00aeab2..244292c 100644
+--- a/packages/tui/test/cli/tui/prompt-interrupt-status.test.tsx
++++ b/packages/tui/test/cli/tui/prompt-interrupt-status.test.tsx
+@@ -17,7 +17,7 @@ test("armed interrupt status renders visible warning text", async () => {
+     await app.renderOnce()
+     const line = app.renderer.currentRenderBuffer.getSpanLines()[0]!
+ 
+-    expect(line.spans.map((span) => span.text).join("")).toContain("esc again to interrupt")
++    expect(line.spans.map((span) => span.text).join("")).toContain("esc otra vez")
+     expect(line.spans.filter((span) => span.text.trim()).every((span) => span.fg.equals(warning))).toBeTrue()
+   } finally {
+     app.renderer.destroy()
+diff --git a/packages/tui/test/cli/tui/session-verbosity.test.ts b/packages/tui/test/cli/tui/session-verbosity.test.ts
+index bc7cd5f..4cff5f1 100644
+--- a/packages/tui/test/cli/tui/session-verbosity.test.ts
++++ b/packages/tui/test/cli/tui/session-verbosity.test.ts
+@@ -259,7 +259,7 @@ test("a thought still streaming counts as finished once a later row closes its g
+   expect(activitySummary(items, 0, true)).toEqual({ label: "1 thought, 1 read", active: false })
+ })
+ 
+-test("until something finishes, the label is the first running item's status", () => {
++test("the most recent running tool stays named after earlier work finishes", () => {
+   const open = {
+     ...assistant("a", [tool("e1", "edit", "running"), tool("s1", "shell", "running")]),
+     time: { created: 1 },
+@@ -267,7 +267,12 @@ test("until something finishes, the label is the first running item's status", (
+   const activity = reduceSessionRows([open], new Set(), false, "low")[0]
+   if (activity.type !== "group") throw new Error("Expected activity")
+   expect(summarizeActivity(activity, () => open, [], false)).toEqual({
+-    label: "Running edit…",
++    label: "Ejecutando comando",
++    active: true,
++  })
++  open.content[0] = tool("e1", "edit")
++  expect(summarizeActivity(activity, () => open, [], false)).toEqual({
++    label: "Ejecutando comando · 1 edit",
+     active: true,
+   })
+ })
+@@ -277,11 +282,11 @@ test("busy labels depend only on the tool and whether it is still being prepared
+     ...tool("s", "bash", "running"),
+     state: { status: "streaming", input: "" },
+   }
+-  expect(busyLabel(streaming)).toBe("Preparing command…")
+-  expect(busyLabel(tool("s", "shell", "running"))).toBe("Running command…")
+-  expect(busyLabel(tool("r", "read", "running"))).toBe("Running read…")
+-  expect(busyLabel(tool("x", "execute", "running"))).toBe("Running code…")
+-  expect(busyLabel({ type: "reasoning", text: "", time: { created: 1 } })).toBe("Thinking…")
++  expect(busyLabel(streaming)).toBe("Preparando comando")
++  expect(busyLabel(tool("s", "shell", "running"))).toBe("Ejecutando comando")
++  expect(busyLabel(tool("r", "read", "running"))).toBe("Ejecutando lectura")
++  expect(busyLabel(tool("x", "execute", "running"))).toBe("Ejecutando código")
++  expect(busyLabel({ type: "reasoning", text: "", time: { created: 1 } })).toBe("Procesando respuesta")
+ })
+ 
+ test("a finished execute with no nested calls counts as one tool", () => {
+diff --git a/packages/tui/test/prompt/activity-visible.test.tsx b/packages/tui/test/prompt/activity-visible.test.tsx
+new file mode 100644
+index 0000000..35bf3a9
+--- /dev/null
++++ b/packages/tui/test/prompt/activity-visible.test.tsx
+@@ -0,0 +1,134 @@
++import { expect, test } from "bun:test"
++import type { OpenCodeEvent } from "@opencode/client"
++import { createAppFixture } from "../fixture/app"
++import { directory, json } from "../fixture/tui-client"
++
++test.each([80, 44])("shows live edits and elapsed time with animations off at %s columns", async (width) => {
++  const started = Date.now()
++  const session = {
++    id: "ses_activity",
++    title: "Actividad",
++    projectID: "proj_test",
++    location: { directory },
++    cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    time: { created: 1, updated: started, busy: started, idle: started - 1 },
++  }
++  const messages = [
++    { id: "msg_user", type: "user", text: "Modifica el archivo", time: { created: started } },
++    {
++      id: "msg_answer",
++      type: "assistant",
++      agent: "build",
++      model: { providerID: "router", id: "normal" },
++      time: { created: started },
++      content: [
++        { type: "reasoning", text: "PRIVATE REASONING", time: { created: started, completed: started } },
++        {
++          type: "tool",
++          id: "read",
++          name: "read",
++          time: { created: started, completed: started },
++          state: { status: "completed", input: { path: "a.ts" }, content: [], metadata: {} },
++        },
++        {
++          type: "tool",
++          id: "edit",
++          name: "edit",
++          time: { created: started },
++          state: { status: "streaming", input: '{"newString":"PARTIAL' },
++        },
++      ],
++    },
++  ]
++  let running = true
++  await using setup = await createAppFixture({
++    width,
++    height: 36,
++    args: { sessionID: session.id },
++    config: {
++      animations: false,
++      tabs: { enabled: false },
++      session: { verbosity: "low" },
++      experimental: { "solucode-suggestions": false },
++    },
++    fetch: (url) => {
++      if (url.pathname === "/api/session") return json({ data: [session], cursor: {} })
++      if (url.pathname === `/api/session/${session.id}`) return json({ data: session })
++      if (url.pathname === `/api/session/${session.id}/message`)
++        return json({ data: messages.toReversed(), cursor: {} })
++      if (url.pathname === "/api/session/active") return json({ data: running ? { [session.id]: {} } : {} })
++      if (
++        url.pathname === `/api/session/${session.id}/inbox` ||
++        url.pathname === `/api/session/${session.id}/permission`
++      )
++        return json({ data: [] })
++    },
++  })
++  await setup.ready
++  await setup.waitForFrame((frame) => frame.includes("PARTIAL") && frame.includes("[⋯]"))
++  const footer = () =>
++    setup
++      .captureCharFrame()
++      .split("\n")
++      .find((line) => line.includes("[⋯]")) ?? ""
++  expect(footer()).toMatch(/\[⋯\]\s+\d+:\d{2}/)
++  expect(setup.captureCharFrame()).toContain("Preparando edición")
++  expect(setup.captureCharFrame()).not.toContain("PRIVATE REASONING")
++  expect(setup.captureCharFrame()).not.toContain("Contenido escrito")
++  let seq = 10
++  type EventInput = {
++    [T in OpenCodeEvent["type"]]: Pick<Extract<OpenCodeEvent, { type: T }>, "type" | "data">
++  }[OpenCodeEvent["type"]]
++  const emit = (event: EventInput) =>
++    setup.events.emit({
++      ...event,
++      id: `evt_${++seq}`,
++      created: started + seq,
++      ...(event.type === "session.tool.input.delta"
++        ? {}
++        : { durable: { aggregateID: session.id, seq, version: event.type === "session.tool.success" ? 2 : 1 } }),
++    } as OpenCodeEvent)
++  emit({
++    type: "session.tool.input.delta",
++    data: { sessionID: session.id, assistantMessageID: "msg_answer", id: "edit", delta: "_NEXT" },
++  })
++  await setup.waitForFrame((frame) => frame.includes("PARTIAL_NEXT"))
++  emit({
++    type: "session.tool.called",
++    data: {
++      sessionID: session.id,
++      assistantMessageID: "msg_answer",
++      id: "edit",
++      executed: true,
++      input: { path: "a.ts", oldString: "before", newString: "after" },
++    },
++  })
++  await setup.waitForFrame((frame) => frame.includes("+ after"))
++  expect(setup.captureCharFrame()).toContain("sin confirmar")
++  emit({
++    type: "session.tool.success",
++    data: {
++      sessionID: session.id,
++      assistantMessageID: "msg_answer",
++      id: "edit",
++      executed: true,
++      content: [{ type: "text", text: "Edited a.ts" }],
++      metadata: {
++        files: [
++          { file: "a.ts", status: "modified", patch: "@@ -1 +1 @@\n-before\n+after", additions: 1, deletions: 1 },
++        ],
++      },
++    },
++  })
++  emit({
++    type: "session.tool.input.started",
++    data: { sessionID: session.id, assistantMessageID: "msg_answer", id: "next", name: "grep" },
++  })
++  await setup.waitForFrame((frame) => frame.includes("Preparando búsqueda") && frame.includes("+after"))
++  expect(setup.captureCharFrame()).toContain("Cambios reportados")
++  expect(footer()).toMatch(/\[⋯\]\s+\d+:\d{2}/)
++  running = false
++  emit({ type: "session.execution.interrupted", data: { sessionID: session.id, reason: "user" } })
++  await setup.waitForFrame((frame) => !frame.includes("[⋯]"))
++})
+diff --git a/packages/tui/test/session-interrupt-undo.test.tsx b/packages/tui/test/session-interrupt-undo.test.tsx
+index f042fa3..e154ed4 100644
+--- a/packages/tui/test/session-interrupt-undo.test.tsx
++++ b/packages/tui/test/session-interrupt-undo.test.tsx
+@@ -63,10 +63,10 @@ async function interrupt(input: { content: unknown[]; draft?: string }) {
+       return response
+     },
+   })
+-  await waitForHighlightedFrame(app, (frame) => frame.includes(ask.text) && frame.includes("interrupt"))
++  await waitForHighlightedFrame(app, (frame) => frame.includes(ask.text) && frame.includes("esc detener"))
+   if (input.draft) await app.mockInput.typeText(input.draft)
+   app.mockInput.pressEscape()
+-  await app.waitForFrame((frame) => frame.includes("again to interrupt"))
++  await app.waitForFrame((frame) => frame.includes("esc otra vez"))
+   app.mockInput.pressEscape()
+   return Object.assign(app, { calls })
+ }
+diff --git a/packages/tui/test/util/activity.test.ts b/packages/tui/test/util/activity.test.ts
+new file mode 100644
+index 0000000..78f8774
+--- /dev/null
++++ b/packages/tui/test/util/activity.test.ts
+@@ -0,0 +1,54 @@
++import { expect, test } from "bun:test"
++import type { SessionMessageAssistant, SessionMessageAssistantTool } from "@opencode/client"
++import { currentActivity, toolActivity } from "../../src/util/activity"
++import { toolPreview } from "../../src/routes/session/activity-preview"
++
++const tool = (name: string, input: Record<string, string> = {}): SessionMessageAssistantTool => ({
++  type: "tool",
++  id: "tool",
++  name,
++  time: { created: 100 },
++  state: { status: "running", input, metadata: {} },
++})
++const assistant = (content: SessionMessageAssistant["content"]): SessionMessageAssistant => ({
++  type: "assistant",
++  id: "assistant",
++  agent: "build",
++  model: { id: "test", providerID: "test" },
++  time: { created: 100 },
++  content,
++})
++
++test("activity labels use actual stage and target without exposing reasoning", () => {
++  expect(currentActivity([], 100)).toBe("Esperando respuesta")
++  expect(currentActivity([assistant([{ type: "reasoning", text: "PRIVATE REASONING" }])], 100)).not.toContain("PRIVATE")
++  const edit = tool("edit", { path: "src/app.ts", oldString: "a", newString: "b" })
++  expect(currentActivity([assistant([edit])], 100)).toBe("Ejecutando edición · src/app.ts")
++  expect(currentActivity([assistant([edit])], 100, true)).toBe("Esperando permiso")
++  expect(currentActivity([assistant([edit])], 200)).toBe("Esperando respuesta")
++  expect(
++    currentActivity([assistant([edit]), { type: "idle", id: "end", outcome: "interrupted", time: { created: 101 } }]),
++  ).toBe("Esperando respuesta")
++  expect(toolActivity({ ...edit, state: { status: "streaming", input: "{" } })).toBe("Preparando edición")
++  expect(
++    currentActivity([
++      { ...assistant([]), retry: { attempt: 2, at: 200, error: { type: "UnknownError", message: "retry" } } },
++    ]),
++  ).toBe("Esperando reintento · intento 2")
++  expect(currentActivity([assistant([tool("question")])])).toBe("Esperando tu respuesta")
++})
++
++test("draft edits and partial arguments never claim to be applied", () => {
++  const edit = tool("edit", { path: "a.ts", oldString: "before", newString: "after" })
++  expect(toolPreview(edit)).toEqual({ title: "Cambio en curso · sin confirmar · a.ts", text: "- before\n+ after" })
++  expect(toolPreview({ ...edit, state: { status: "streaming", input: '{"newString":"partial' } })).toEqual({
++    title: "Argumentos parciales · sin ejecutar",
++    text: '{"newString":"partial',
++    tail: true,
++  })
++  expect(toolPreview(tool("write", { path: "a.ts", content: "first line" }))?.title).toContain("sin confirmar")
++  expect(toolPreview(tool("patch", { patchText: "*** Begin Patch\n+line" }))?.text).toContain("+line")
++  expect(
++    toolPreview({ ...edit, state: { status: "error", input: {}, error: { type: "UnknownError", message: "denied" } } }),
++  ).toBeUndefined()
++})
+diff --git a/packages/tui/test/util/execution-progress.test.ts b/packages/tui/test/util/execution-progress.test.ts
+new file mode 100644
+index 0000000..05a87d8
+--- /dev/null
++++ b/packages/tui/test/util/execution-progress.test.ts
+@@ -0,0 +1,68 @@
++import { expect, test } from "bun:test"
++import { createRoot, createSignal } from "solid-js"
++import { createExecutionElapsed, elapsedTime, executionStart } from "../../src/util/execution-progress"
++
++test("hydrates the execution timestamp and replaces the old one before the session refresh arrives", () => {
++  expect(executionStart({ busy: 10, idle: 20 })).toBeUndefined()
++  expect(executionStart({ busy: 30, idle: 20 })).toBe(30)
++  expect(executionStart({ busy: 10, idle: 20 }, 50)).toBe(50)
++  expect(executionStart({ busy: 30, idle: 20 }, 50)).toBe(50)
++  expect(elapsedTime(undefined, 5_000)).toBe("--:--")
++  expect(elapsedTime(6_000, 5_000)).toBe("0:00")
++  expect(elapsedTime(0, 3_661_000)).toBe("61:01")
++})
++
++test("elapsed time survives tool updates, session switches and remount; idle and disposal stop the clock", async () => {
++  let now = 65_000
++  const timers = new Set<() => void>()
++  const clock = {
++    now: () => now,
++    every(tick: () => void) {
++      timers.add(tick)
++      return () => {
++        timers.delete(tick)
++      }
++    },
++  }
++  const mount = () =>
++    createRoot((dispose) => {
++      const [input, setInput] = createSignal<{ started?: number; active: boolean }>({ started: 5_000, active: true })
++      return { dispose, setInput, elapsed: createExecutionElapsed(input, clock) }
++    })
++  const scope = mount()
++  try {
++    await Promise.resolve()
++    expect(scope.elapsed()).toBe("1:00")
++    expect(timers.size).toBe(1)
++    now += 1_000
++    timers.forEach((tick) => tick())
++    expect(scope.elapsed()).toBe("1:01")
++    // A tool finishing and another starting cannot restart the server's execution timestamp.
++    scope.setInput({ started: 5_000, active: true })
++    await Promise.resolve()
++    expect(scope.elapsed()).toBe("1:01")
++    expect(timers.size).toBe(1)
++    scope.setInput({ started: 60_000, active: true })
++    await Promise.resolve()
++    expect(scope.elapsed()).toBe("0:06")
++    scope.setInput({ started: 5_000, active: true })
++    await Promise.resolve()
++    expect(scope.elapsed()).toBe("1:01")
++    scope.setInput({ started: 5_000, active: false })
++    await Promise.resolve()
++    expect(timers.size).toBe(0)
++    now = 120_000
++    scope.setInput({ started: 119_000, active: true })
++    await Promise.resolve()
++    expect(scope.elapsed()).toBe("0:01")
++    scope.dispose()
++    expect(timers.size).toBe(0)
++    const restored = mount()
++    await Promise.resolve()
++    expect(restored.elapsed()).toBe("1:55")
++    restored.dispose()
++    expect(timers.size).toBe(0)
++  } finally {
++    scope.dispose()
++  }
++})
