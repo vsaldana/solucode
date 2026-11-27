@@ -31,4 +31,7 @@ echo "sugerencias aplicadas con parches/sugerencias.patch"
 git apply --check "$raiz/parches/autoactualizacion.patch"
 git apply "$raiz/parches/autoactualizacion.patch"
 echo "autoactualización aplicada con parches/autoactualizacion.patch"
+git apply --check "$raiz/parches/sigma.patch"
+git apply "$raiz/parches/sigma.patch"
+echo "sigma aplicado con parches/sigma.patch"
 git --no-pager diff --stat
