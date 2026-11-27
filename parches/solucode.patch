@@ -54,24 +54,22 @@ index e5a47e6..5a39c07 100755
    Effect.catchCause((cause) =>
      Effect.logError("cli process failed", {
 diff --git a/packages/cli/src/services/updater.ts b/packages/cli/src/services/updater.ts
-index 0c38bab..601e229 100644
+index 0c38bab..1d4f8a5 100644
 --- a/packages/cli/src/services/updater.ts
 +++ b/packages/cli/src/services/updater.ts
-@@ -704,7 +704,17 @@ const make = Effect.gen(function* () {
+@@ -704,7 +704,15 @@ const make = Effect.gen(function* () {
      Effect.catch((error) => Effect.logWarning("update check failed", { error }).pipe(Effect.as(undefined))),
    )
  
 -  return Service.of({ run, check, apply, method, managed, latest, upgrade, removal })
++  const servicioOriginal = { run, check, apply, method, managed, latest, upgrade, removal }
 +  const mensajeSolucode = 'Para actualizar SOLUCODE, vuelve a correr: irm https://router.conversus.digital/instalar.ps1 | iex'
 +  return Service.of({
++    ...servicioOriginal,
 +    run: () => Effect.succeed(undefined),
 +    check: () => Effect.succeed({ type: "unavailable" as const, message: mensajeSolucode }),
 +    apply: () => Effect.fail(new Error(mensajeSolucode)),
-+    method,
-+    managed,
-+    latest,
 +    upgrade: () => Effect.fail(new Error(mensajeSolucode)),
-+    removal,
 +  })
  })
  

@@ -68,6 +68,11 @@ jobs:
           bun install --frozen-lockfile
           echo "BUN_COMPILE_RELEASE=bun-v$(bun --version)" >> "$GITHUB_ENV"
 
+      - name: Prueba las sugerencias y regenera el cliente
+        if: steps.plan.outputs.compilar == 'true'
+        working-directory: upstream
+        run: bash ../script/probar.sh
+
       - name: Catálogo de modelos
         if: steps.plan.outputs.compilar == 'true'
         working-directory: upstream

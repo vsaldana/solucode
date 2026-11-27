@@ -62,16 +62,14 @@ cambiar("packages/cli/src/index.ts",
 # 6. Nada se actualiza solo ni baja el OpenCode original: se actualiza con el instalador.
 cambiar("packages/cli/src/services/updater.ts",
     "  return Service.of({ run, check, apply, method, managed, latest, upgrade, removal })",
-    f'''  const mensajeSolucode = {MENSAJE!r}
+    f'''  const servicioOriginal = {{ run, check, apply, method, managed, latest, upgrade, removal }}
+  const mensajeSolucode = {MENSAJE!r}
   return Service.of({{
+    ...servicioOriginal,
     run: () => Effect.succeed(undefined),
     check: () => Effect.succeed({{ type: "unavailable" as const, message: mensajeSolucode }}),
     apply: () => Effect.fail(new Error(mensajeSolucode)),
-    method,
-    managed,
-    latest,
     upgrade: () => Effect.fail(new Error(mensajeSolucode)),
-    removal,
   }})''')
 cambiar("packages/cli/src/commands/handlers/upgrade.ts",
     '      intro("Upgrade")\n',
