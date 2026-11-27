@@ -121,13 +121,21 @@
          <box flexDirection="row" justifyContent="flex-end">
 --- a/packages/tui/src/util/presentation.ts
 +++ b/packages/tui/src/util/presentation.ts
-@@ -1,4 +1,4 @@
+@@ -1,10 +1,12 @@
 -import { logo } from "../logo"
 +import { logo, sigmaLine } from "../logo"
  
  const reset = "\x1b[0m"
  const bold = "\x1b[1m"
-@@ -17,9 +17,16 @@
+ const dim = "\x1b[90m"
+ 
+ function wordmark(pad = "") {
++  const width = process.stdout.columns ?? 80
++  if (width < 21) return [`${pad}${bold}${width < 12 ? "Σ" : "Σ SOLUCODE"}${reset}`]
+   const draw = (line: string, fg: string, shadow: string, bg: string) =>
+     [...line]
+       .map((char) => {
+@@ -17,9 +19,17 @@
        .join("")
  
    return logo.left.map((line, index) => {
@@ -138,6 +146,7 @@
 +        return `${cell.fg ? color(cell.fg, false) : ""}${cell.bg ? color(cell.bg, true) : ""}${cell.char}${reset}`
 +      })
 +      .join("")
++    if (width < 52) return `${pad}${sigma}${index === 1 ? `  ${bold}SOLUCODE${reset}` : ""}`
      const left = draw(line, dim, "\x1b[38;5;235m", "\x1b[48;5;235m")
      const right = draw(logo.right[index] ?? "", reset, "\x1b[38;5;238m", "\x1b[48;5;238m")
 -    return `${pad}${left} ${right}`
