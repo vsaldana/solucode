@@ -5,11 +5,26 @@ SOLUCODE es OpenCode (licencia MIT, [anomalyco/opencode](https://github.com/anom
 Conserva la configuración (`%ProgramData%\opencode`, `~/.config/opencode`) y las variables `OPENCODE_*`. Los cambios están en `parches/`:
 
 - el logo lleva un sigma blanco sobre un círculo turquesa antes de SOLUCODE, con «basado en OpenCode» debajo; se adapta al ancho de la terminal y también aparece al cerrar;
-- el comando es `solucode`, y `solucode --version` dice `solucode v2.4.2-solucode.4 (basado en OpenCode 2.4.2)`;
+- el comando es `solucode`, y `solucode --version` dice `solucode v2.4.2-solucode.5 (basado en OpenCode 2.4.2)`;
 - el título de la ventana dice SOLUCODE;
 - mientras la terminal está abierta, descarga en segundo plano las versiones nuevas aprobadas por el router; quedan instaladas para la próxima apertura. `solucode upgrade` permite comprobar e instalar manualmente esa misma versión aprobada.
 - al terminar una respuesta, puede sugerir el próximo mensaje; Tab o flecha derecha lo copia al editor, donde se puede modificar antes de enviarlo con Enter. Escribir descarta la sugerencia.
 - los modelos del router no ofrecen selector ni comandos de esfuerzo; ese ajuste se administra en `router.conversus.digital`.
+- durante una ejecución se ve la herramienta actual, avances parciales y el tiempo transcurrido junto al indicador inferior izquierdo, incluso con las animaciones desactivadas.
+
+## Actividad durante la ejecución
+
+El modo compacto mantiene visible la herramienta actual aunque otras ya hayan terminado. Muestra la salida viva
+del comando activo y hasta dos vistas breves: la herramienta actual y el último cambio reportado del grupo abierto.
+Los argumentos parciales se identifican como «sin ejecutar»; las propuestas de edición y escritura, como «sin confirmar».
+Los cambios reportados por las herramientas se muestran cuando llegan, sin esperar la respuesta final.
+Las vistas de edición ocupan como máximo seis líneas de texto; el resumen permite desplegar el detalle completo.
+En modo compacto el razonamiento permanece colapsado y las preferencias de detalle existentes se conservan.
+
+El contador usa el inicio real de la ejecución y continúa entre herramientas y llamadas al modelo. Se restaura
+al cambiar de sesión o reabrir una ejecución activa, y deja de actualizarse al finalizar, interrumpir o cerrar la vista.
+Mientras aún no llega el inicio del servidor muestra `--:--`. En terminales estrechas se da prioridad al contador
+y a «esc detener» sobre los atajos secundarios. No se muestran porcentajes ni avances estimados.
 
 ## Sugerencias de próximo mensaje
 
@@ -40,7 +55,8 @@ irm https://router.conversus.digital/instalar.ps1 | iex
 - `script/aplicar.sh <versión> <carpeta>` trae OpenCode en esa versión y le aplica `parches/solucode.patch`. Si el parche ya no calza, prueba `parches/marca.py`, que hace los mismos cambios buscando los textos.
 - Después aplica obligatoriamente `parches/sugerencias.patch`; si no calza, falla y hay que adaptarlo. Usa una carpeta nueva: el guion no borra destinos existentes.
 - Aplica también `parches/autoactualizacion.patch`, con el cliente de actualizaciones y sus pruebas de Windows.
-- Finalmente aplica `parches/sigma.patch`, con el emblema de marca para la terminal. Su paleta fija pertenece al dibujo; el nombre y la leyenda conservan los colores del tema.
+- Aplica `parches/sigma.patch`, con el emblema de marca para la terminal. Su paleta fija pertenece al dibujo; el nombre y la leyenda conservan los colores del tema.
+- Finalmente aplica `parches/actividad.patch`, con las vistas parciales de herramientas, su estado actual y el contador de ejecución.
 - `script/probar.sh`, desde el clon con sus dependencias, regenera el cliente y prueba lógica, terminal, generación y tipos. `verificar.yml` lo hace en Linux y Windows; Linux ejecuta también `bun run check`.
 - `.github/workflows/compilar.yml` compila igual que el `build-cli` de OpenCode:
   - con un tag `v<versión>-solucode.<n>` publica el release con `solucode-windows-x64.zip`;
